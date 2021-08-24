@@ -1,2 +1,2 @@
-mitmproxy --listen-host 127.0.0.1 -p 8888 -s mitm_ws_sniffer.py
-# -w dump_file
+mitmdump -q --listen-host 127.0.0.1 -p 8888 -s mitm_ws_sniffer.py
+# -w dumps\dumpfile
