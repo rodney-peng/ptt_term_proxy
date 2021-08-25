@@ -1,2 +1,2 @@
-mitmdump -q --listen-host 127.0.0.1 -p 8888 -s mitm_ws_sniffer.py
+mitmdump -q --listen-host 127.0.0.1 -p 8888 -s mitm_ptt_addon.py
 # -w dumps\dumpfile

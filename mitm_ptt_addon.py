@@ -15,7 +15,7 @@ class MyScreen(pyte.Screen):
         line = (line or 1) - 1
         column = (column or 1) - 1
         if line or column:
-            # double-bytes character should be treated as width 2
+            # double-byte character should be treated as width 2
             content = self.display[line]
             chridx = 0  # character index
             curpos = 0  # cursor position
@@ -31,9 +31,9 @@ class MyScreen(pyte.Screen):
     def draw(self, char):
         content = self.display[self.cursor.y]
         if ord(char) < 256:
-            # a single-byte character overwrites a double-byte character
             bInsert = False
             if ord(content[self.cursor.x]) >= 256:
+                # a single-byte character overwrites a double-byte character
 #                print("'%c' overwrites '%c'" % (char, content[self.cursor.x]))
                 bInsert = True
             super(MyScreen, self).draw(char)
@@ -43,18 +43,14 @@ class MyScreen(pyte.Screen):
             # a double-byte character overwrites two characters
             bDelete = False
             bErase = False
-            try:
-                # self.cursor.x+1 may be out of boundary
-                if ord(content[self.cursor.x]) < 256:
-#                    print("'%c' overwrites '%c' '%c'" % (char, content[self.cursor.x], content[self.cursor.x+1]))
-                    if ord(content[self.cursor.x+1]) < 256:
-                        # two single-byte characters
-                        bDelete = True
-                    else:
-                        # a single-byte character followed by a double-byte character
-                        bErase = True
-            except:
-                pass
+            if ord(content[self.cursor.x]) < 256 and (self.cursor.x + 1) < self.columns:
+#                print("'%c' overwrites '%c' '%c'" % (char, content[self.cursor.x], content[self.cursor.x+1]))
+                if ord(content[self.cursor.x+1]) < 256:
+                    # two single-byte characters
+                    bDelete = True
+                else:
+                    # a single-byte character followed by a double-byte character
+                    bErase = True
             if bDelete:
                 self.delete_characters()
             elif bErase:
@@ -117,7 +113,7 @@ def locate_from_screen(screen, bBottom = False):
             try:
                 board = re.search("^\s*【板主:.+看板《(\w+)》\s*$", lines[0]).group(1)
                 print("In board: %r" % board)
-            except:
+            except (AttributeError, IndexError):
                 print("Board missing: %r" % lines[0])
 
             showCursor(screen)
@@ -135,13 +131,13 @@ def locate_from_screen(screen, bBottom = False):
                 try:
                     board = re.match("\s+作者\s+.+看板\s+(\w+)\s*$", lines[0]).group(1)
                     print("Board: %r" % board)
-                except:
+                except (AttributeError, IndexError):
                     print("Board missing: %r" % lines[0])
 
                 try:
                     title = re.match("\s+標題\s+(\S.+)\s*$", lines[1]).group(1)
                     print("Title: %r" % title)
-                except:
+                except (AttributeError, IndexError):
                     print("Title missing: %r" % lines[1])
             return
 
@@ -298,122 +294,7 @@ class SniffWebSocket:
         """
         print("websocket_end")
 
-if __name__ == "__main__":
-    import argparse
-    import asyncio
-    import signal
-    import typing
-    from time import sleep
-
-    from mitmproxy import options, optmanager, exceptions
-    from mitmproxy.tools.main import process_options, run
-    from mitmproxy.tools.dump import DumpMaster
-    from mitmproxy.tools import cmdline
-    from mitmproxy.utils import debug, arg_check
-#    from mitmproxy.addons.proxyserver import Proxyserver
-#    from mitmproxy.proxy.server import TimeoutWatchdog
-
-    class myDumpMaster(DumpMaster):
-
-        def __init__(
-            self,
-            options: options.Options,
-            with_termlog=True,
-            with_dumper=True,
-        ) -> None:
-            super().__init__(options, with_termlog, with_dumper)
-            self._watchdog_time = -1
-
-        def on_SIGUSR1(self):
-            print("master got SIGUSR1", self._watchdog_time)
-            if self.sniffer:
-                self.sniffer.on_SIGUSR1()
-
-        def add_sniffer(self, sniffer):
-            self.sniffer = sniffer
-            self.addons.add(sniffer)
-
-        async def watch_server(self):
-            server = self.addons.get("proxyserver")
-            print(server)
-
-            while True:
-                await asyncio.sleep(conn.timeout_watchdog.CONNECTION_TIMEOUT // 2)
-
-                for conn in server._connections.values():
-                    self._watchdog_time = conn.timeout_watchdog.last_activity
-                    # kick watchdog by calling disarm()
-                    with conn.timeout_watchdog.disarm():
-                        pass
-
-
-    print("PID", os.getpid())
-
-    debug.register_info_dumpers()
-
-    opts = options.Options(listen_host="127.0.0.1", listen_port=8888)
-    master = myDumpMaster(opts)
-
-    master.add_sniffer(SniffWebSocket())
-    asyncio.ensure_future(master.watch_server())
-
-    parser = cmdline.mitmdump(opts)
-
-    try:
-        args = parser.parse_args()  # filter_args?
-    except SystemExit:
-        arg_check.check()
-        sys.exit(1)
-
-    try:
-        opts.set(*args.setoptions, defer=True)
-        optmanager.load_paths(
-            opts,
-            os.path.join(opts.confdir, "config.yaml"),
-            os.path.join(opts.confdir, "config.yml"),
-        )
-        process_options(parser, opts, args)
-
-        if args.options:
-            optmanager.dump_defaults(opts, sys.stdout)
-            sys.exit(0)
-        if args.commands:
-            master.commands.dump()
-            sys.exit(0)
-        '''
-        if extra:
-            if args.filter_args:
-                master.log.info(f"Only processing flows that match \"{' & '.join(args.filter_args)}\"")
-            opts.update(**extra(args))
-        '''
-
-        loop = asyncio.get_event_loop()
-        try:
-            loop.add_signal_handler(signal.SIGINT, getattr(master, "prompt_for_exit", master.shutdown))
-            loop.add_signal_handler(signal.SIGTERM, master.shutdown)
-            loop.add_signal_handler(signal.SIGUSR1, master.on_SIGUSR1)
-        except NotImplementedError:
-            # Not supported on Windows
-            pass
-
-        # Make sure that we catch KeyboardInterrupts on Windows.
-        # https://stackoverflow.com/a/36925722/934719
-        if os.name == "nt":
-            async def wakeup():
-                while True:
-                    await asyncio.sleep(0.2)
-            asyncio.ensure_future(wakeup())
-
-        master.run()
-    except exceptions.OptionsError as e:
-        print("{}: {}".format(sys.argv[0], e), file=sys.stderr)
-        sys.exit(1)
-    except (KeyboardInterrupt, RuntimeError):
-        pass
-
-#    run(myDumpMaster, cmdline.mitmdump, None)
-else:
-    addons = [
-        SniffWebSocket()
-    ]
+addons = [
+    SniffWebSocket()
+]
 

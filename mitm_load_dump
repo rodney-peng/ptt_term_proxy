@@ -1,1 +1,1 @@
-mitmdump -n -q -s mitm_ws_sniffer.py -r dumps/ws_ptt_dump
+mitmdump -n -q -s mitm_ptt_addon.py -r dumps/ws_ptt_dump
