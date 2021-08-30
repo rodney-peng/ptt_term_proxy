@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import pyte
+import asyncio
 
 from mitmproxy import http
 
@@ -11,110 +12,58 @@ register_uao()
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
 
-    def cursor_position(self, line=None, column=None):
-        line = (line or 1) - 1
-        column = (column or 1) - 1
-        if line or column:
-            # double-byte character should be treated as width 2
-            content = self.display[line]
-            chridx = 0  # character index
-            curpos = 0  # cursor position
-            while curpos < column:
-                curpos += (1 if (len(content) <= chridx) or (ord(content[chridx]) < 256) else 2)
-                chridx += 1
-#            if chridx != curpos:
-#                print("col", column, "cur", curpos, "idx", chridx, "|%s|" % content)
-            super(MyScreen, self).cursor_position(line + 1, chridx + 1)
-        else:
-            super(MyScreen, self).cursor_position()
-
     def draw(self, char):
-        content = self.display[self.cursor.y]
-        if ord(char) < 256:
-            bInsert = False
-            if ord(content[self.cursor.x]) >= 256:
-                # a single-byte character overwrites a double-byte character
-#                print("'%c' overwrites '%c'" % (char, content[self.cursor.x]))
-                bInsert = True
-            super(MyScreen, self).draw(char)
-            if bInsert:
-                self.insert_characters()
-        else:
-            # a double-byte character overwrites two characters
-            bDelete = False
-            bErase = False
-            if ord(content[self.cursor.x]) < 256 and (self.cursor.x + 1) < self.columns:
-#                print("'%c' overwrites '%c' '%c'" % (char, content[self.cursor.x], content[self.cursor.x+1]))
-                if ord(content[self.cursor.x+1]) < 256:
-                    # two single-byte characters
-                    bDelete = True
-                else:
-                    # a single-byte character followed by a double-byte character
-                    bErase = True
-            if bDelete:
-                self.delete_characters()
-            elif bErase:
-                self.erase_characters(2)
-            super(MyScreen, self).draw(char)
+        # the current character won't be null, will it?
+        #     assert self.buffer[self.cursor.y][self.cursor.x].data != ''
+        super(MyScreen, self).draw(char)
+
+        # the cursor will not be at the last column, won't it?
+        #     assert self.cursor.x < self.columns
+        if ord(char) > 0xff:
+            super(MyScreen, self).draw('')
+
 
 # for event debugging
-class MyStream(pyte.Stream):
-    def __init__(self, to=sys.stdout, only=(), *args, **kwargs):
-        super(MyStream, self).__init__(*args, **kwargs)
+class MyDebugStream(pyte.DebugStream):
 
-        def safe_str(chunk):
-            if isinstance(chunk, bytes):
-                chunk = chunk.decode("utf-8")
-            elif not isinstance(chunk, str):
-                chunk = str(chunk)
-
-            return chunk
-
-        class Bugger(object):
-            __before__ = __after__ = lambda *args: None
-
-            def __getattr__(self, event):
-                def inner(*args, **flags):
-                    to.write(event.upper() + " ")
-                    to.write("; ".join(map(safe_str, args)))
-                    to.write(" ")
-                    to.write(", ".join("{0}: {1}".format(name, safe_str(arg))
-                                       for name, arg in flags.items()))
-                    to.write(os.linesep)
-                return inner
-
-        self.attach(Bugger(), only=only)
+    def feed(self, chars):
+        # DebugStream inherits ByteStream and feed() takes bytes but not string
+        # re-route to Stream.feed()
+        super(pyte.ByteStream, self).feed(chars)
 
 
 def showScreen(screen):
     lines = screen.display
     print("Cursor:", screen.cursor.y, screen.cursor.x, "Lines:", len(lines))
     for n, line in enumerate(lines, 1):
-        print(n, "%r" % line)
+        print("%2d" % n, "'%s'" % line)
 
 def showCursor(screen):
-    print("Cursor:", screen.cursor.y, screen.cursor.x, "%r" % screen.display[screen.cursor.y])
+    print("Cursor:", screen.cursor.y, screen.cursor.x, "'%s'" % screen.display[screen.cursor.y])
 
 def locate_from_screen(screen, bBottom = False):
     lines = screen.display
 
     if bBottom:
-        print("bottom: %r" % lines[-1])
+#        print("top   : '%s'" % lines[0])
+#        print("bottom: '%s'" % lines[-1])
 
-        if re.search("請按.+鍵.*繼續", lines[-1]):
-            print("等待按鍵")
-            return
+        for input_pattern in [".+請?按.+鍵.*繼續", "請選擇", '搜尋.+', '\s*★快速切換']:
+            if re.match(input_pattern, lines[-1]):
+                print("Waiting input...")
+                return
 
-        if re.search("請選擇", lines[-1]):
-            print("等待選擇")
-            return
+        for panel in ['【主功能表】', '【分類看板】', '【看板列表】', '【 選擇看板 】', '【個人設定】']:
+            if re.match(panel, lines[0]):
+                print("In panel")
+                return
 
         if re.match("\s*文章選讀", lines[-1]):
             try:
                 board = re.search("^\s*【板主:.+看板《(\w+)》\s*$", lines[0]).group(1)
-                print("In board: %r" % board)
+                print("In board: '%s'" % board)
             except (AttributeError, IndexError):
-                print("Board missing: %r" % lines[0])
+                print("Board missing: '%s'" % lines[0])
 
             showCursor(screen)
             return
@@ -130,73 +79,16 @@ def locate_from_screen(screen, bBottom = False):
             if (lineStart == 1):
                 try:
                     board = re.match("\s+作者\s+.+看板\s+(\w+)\s*$", lines[0]).group(1)
-                    print("Board: %r" % board)
+                    print("Board: '%s'" % board)
                 except (AttributeError, IndexError):
-                    print("Board missing: %r" % lines[0])
+                    print("Board missing: '%s'" % lines[0])
 
                 try:
                     title = re.match("\s+標題\s+(\S.+)\s*$", lines[1]).group(1)
-                    print("Title: %r" % title)
+                    print("Title: '%s'" % title)
                 except (AttributeError, IndexError):
-                    print("Title missing: %r" % lines[1])
+                    print("Title missing: '%s'" % lines[1])
             return
-
-def server_message(screen, stream, content):
-    print("\nserver: (%d)" % len(content))
-
-    stream.feed(content.decode("big5uao", 'replace'))
-
-    # dirty trick to identify the last segment with size
-    # (FIXME)
-    # but sometimes a segment with size 1021 is not the last or the last segment is larger than 1021
-    # (FIXME)
-    # a double-byte character could be split into two segments
-    if len(content) < 1021:
-        locate_from_screen(screen, bBottom=True)
-
-vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
-xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
-def client_message(screen, content):
-    print("\nclient:", content)
-
-    sESC = '\x1b'
-    sCSI = '['
-    sNUM = '0'
-
-    state = None
-    number = ""
-    for b in content:
-        if state != sNUM:
-            number = ""
-
-        c = chr(b)
-        if state == None:
-            if c == sESC:
-                state = sESC
-            elif c == '\r':
-                print("Key: Enter")
-        elif state == sESC:
-            if c == sCSI:
-                state = sCSI
-            else:
-                state = None
-        elif state == sCSI:
-            if 'A' <= c <= 'H':
-                print("xterm key:", xterm_keys[b - ord('A')])
-            elif '0' <= c <= '9':
-                state = sNUM
-                number += c
-                continue
-            state = None
-        elif state == sNUM:
-            if '0' <= c <= '9':
-                number += c
-                continue
-            elif c == '~':
-                number = int(number)
-                if 1 <= number <= len(vt_keys):
-                    print("vt key:", vt_keys[number-1])
-            state = None
 
 
 class SniffWebSocket:
@@ -204,14 +96,103 @@ class SniffWebSocket:
     def __init__(self):
         print("SniffWebSocket init")
         self.screen = MyScreen(128, 32)
-#        self.stream = MyStream(only=["draw", "cursor_position"])
+#        self.stream = MyDebugStream(only=["draw", "cursor_position"])
         self.stream = pyte.Stream()
         self.stream.attach(self.screen)
         self.lastServerMsgTime = -1
+        self.server_msgs = bytes()
 
     def on_SIGUSR1(self):
         print("sniffer got SIGUSR1")
         showScreen(self.screen)
+
+    def purge_server_message(self):
+        if len(self.server_msgs):
+            self.stream.feed(self.server_msgs.decode("big5uao", 'replace'))
+            locate_from_screen(self.screen, bBottom=True)
+            self.server_msgs = bytes()
+
+    def server_message(self, content):
+        n = len(content)
+        print("\nserver: (%d)" % n)
+
+        self.server_msgs = bytes().join([self.server_msgs, content])
+
+        # dirty trick to identify the last segment with size
+        # (FIXME) Done: handled in server_msg_timeout()
+        # but sometimes a segment with size 1021 is not the last or the last segment is larger than 1021
+        # (FIXME) Done: queue message segments in server_msgs
+        # a double-byte character could be split into two segments
+        if n < 1021:
+            self.server_event.clear()
+            self.purge_server_message()
+        else:
+            self.server_event.set()
+
+    vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
+    xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
+    def client_message(self, content):
+        print("\nclient:", content)
+
+        if self.server_event.is_set():
+            self.server_event.clear()
+            self.purge_server_message()
+
+        sESC = '\x1b'
+        sCSI = '['
+        sNUM = '0'
+
+        state = None
+        number = ""
+        for b in content:
+            if state != sNUM:
+                number = ""
+
+            c = chr(b)
+            if state == None:
+                if c == sESC:
+                    state = sESC
+                elif c == '\r':
+                    print("Key: Enter")
+            elif state == sESC:
+                if c == sCSI:
+                    state = sCSI
+                else:
+                    state = None
+            elif state == sCSI:
+                if 'A' <= c <= 'H':
+                    print("xterm key:", self.xterm_keys[b - ord('A')])
+                elif '0' <= c <= '9':
+                    state = sNUM
+                    number += c
+                    continue
+                state = None
+            elif state == sNUM:
+                if '0' <= c <= '9':
+                    number += c
+                    continue
+                elif c == '~':
+                    number = int(number)
+                    if 1 <= number <= len(self.vt_keys):
+                        print("vt key:", self.vt_keys[number-1])
+                state = None
+
+    async def server_msg_timeout(self, flow, event):
+
+        print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
+        while flow.websocket.timestamp_end is None:
+            await event.wait()
+
+            rcv_len = len(self.server_msgs)
+            while True:
+                await asyncio.sleep(0.1)
+                if len(self.server_msgs) <= rcv_len:
+                    break
+
+            print("Server event timeout! Pending:", len(self.server_msgs))
+            if event.is_set():
+                event.clear()
+                self.purge_server_message()
 
     # Websocket lifecycle
 
@@ -239,6 +220,9 @@ class SniffWebSocket:
         self.screen.reset()
         self.stream.reset()
         self.lastServerMsgTime = -1
+        self.server_msgs = bytes()
+        self.server_event = asyncio.Event()
+        asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
 
     def websocket_message(self, flow: http.HTTPFlow):
         """
@@ -273,10 +257,9 @@ class SniffWebSocket:
             '''
 
             if flow_msg.from_client:
-                client_message(self.screen, flow_msg.content)
+                self.client_message(flow_msg.content)
             else:
-                server_message(self.screen, self.stream, flow_msg.content)
-
+                self.server_message(flow_msg.content)
 
     def websocket_error(self, flow: http.HTTPFlow):
         """
@@ -284,7 +267,7 @@ class SniffWebSocket:
             A websocket connection has had an error.
 
         """
-        print("websocket_error, %r" % flow)
+        print("websocket_error", flow)
 
     def websocket_end(self, flow: http.HTTPFlow):
         """
