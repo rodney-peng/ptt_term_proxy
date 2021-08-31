@@ -33,7 +33,15 @@ class myDumpMaster(DumpMaster):
         print("master got SIGUSR1", self._watchdog_time)
         if self.sniffers:
             for addon in self.sniffers:
-                addon.on_SIGUSR1()
+                if hasattr(addon, "on_SIGUSR1"):
+                    addon.on_SIGUSR1()
+
+    def on_SIGUSR2(self):
+        print("master got SIGUSR2", self._watchdog_time)
+        if self.sniffers:
+            for addon in self.sniffers:
+                if hasattr(addon, "on_SIGUSR2"):
+                    addon.on_SIGUSR2()
 
     def add_sniffer(self, *sniffers):
         self.sniffers = sniffers
@@ -102,6 +110,7 @@ try:
         loop.add_signal_handler(signal.SIGINT, getattr(master, "prompt_for_exit", master.shutdown))
         loop.add_signal_handler(signal.SIGTERM, master.shutdown)
         loop.add_signal_handler(signal.SIGUSR1, master.on_SIGUSR1)
+        loop.add_signal_handler(signal.SIGUSR2, master.on_SIGUSR2)
     except NotImplementedError:
         # Not supported on Windows
         pass
