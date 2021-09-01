@@ -3,6 +3,7 @@ import os
 import re
 import pyte
 import asyncio
+from time import sleep
 
 from mitmproxy import http, ctx
 
@@ -32,27 +33,44 @@ class MyDebugStream(pyte.DebugStream):
         super(pyte.ByteStream, self).feed(chars)
 
 
+class UserEvent:
+    Unknown = 0
+    Key_Up = 1
+    Key_Down = 2
+    Key_Right = 3
+    Key_Left = 4
+    Key_Enter = 5
+    # 32 ~ 126 is the same viewable ASCII code
+
+    def isViewable(event: int):
+        return ' ' <= chr(event) <= '~'
+
+    def name(event: int):
+        assert event >= 0
+        return ["-", "Up", "Down", "Right", "Left", "Enter"][event] if event <= UserEvent.Key_Enter else chr(event)
+
 class PttThread:
 
     def __init__(self):
         self.clear()
-        self.begin = self.end = False
 
-    def markBegin(self, bBegin):
-        self.begin = bBegin
+    def clear(self):
+        self.lines = []
+        self.lastViewed = 0
+        self.url = None
+        self.atBegin = self.atEnd = False
 
-    def markEnd(self, bEnd):
-        self.end = bEnd
+    LINE_HOLDER = chr(0x7f)
 
-    def isBegin(self):
-        return self.begin
+    def view(self, lines, first: int, last: int, atEnd: bool):
+        self.atBegin = (first == 1)
+        self.atEnd = atEnd
 
-    def isEnd(self):
-        return self.end
-
-    def view(self, lines, first: int, last: int):
         if self.lastViewed < last:
-            self.lines.extend(["" for _ in range(last - self.lastViewed)])
+            # which is better?
+            #   [self.LINE_HOLDER for _ in range(last - self.lastViewed)]
+            #   self.LINE_HOLDER * (last - self.lastViewed)
+            self.lines.extend(self.LINE_HOLDER * (last - self.lastViewed))
             self.lastViewed = last
 
         print("View lines:", first, last, "curr:", len(self.lines), self.lastViewed)
@@ -70,16 +88,13 @@ class PttThread:
                 first += 1
             i += 1
 
+        if text and first <= last:
+            self.lines[first-1] = text
+#            print("add [%d]" % first, "'%s'" % self.lines[first-1])
+            first += 1
+
         if first <= last:
             print("\nCaution: line wrap is probably missing!\n")
-
-    def clear(self):
-        self.lines = []
-        self.lastViewed = 0
-        self.url = None
-
-    def numberOfLines(self):
-        return self.lastViewed
 
     def text(self, first = 1, last = -1):
 #        print("text:", first, last, self.lastViewed)
@@ -110,6 +125,80 @@ class PttThread:
             i -= 1
 
         return None
+
+    def show(self, complete=True):
+        url = self.scanURL()
+        print("\nThread lines:", self.lastViewed, "url:", url)
+        if url:
+            board, fn = self.url2fn(url)
+            aidc = self.fn2aidc(fn)
+            print("board:", board, "fn:", fn, "aidc:", aidc)
+        if complete:
+            print(self.text())
+        else:
+            print(self.text(1, 3))
+            print(self.text(-3))
+
+        print()
+
+    def saveToFile(self):
+        def write(lines, f):
+            '''
+            merge new and existing content:
+            if new line is not empty(has LINE_HOLDER only), always overwrites existing one
+            otherwise skip to the next line
+            '''
+            existing = len(lines)
+            for n, text in enumerate(self.lines):
+                if text != self.LINE_HOLDER:
+                    f.write(text + '\n')
+                elif n < existing:
+                    f.write(lines[n])
+                else:
+                    f.write('\n')
+
+            n += 1
+            print("Write new lines:", n)
+            while n < existing:
+                f.write(lines[n])
+                n += 1
+            print("Write total lines:", n)
+
+        url = self.scanURL()
+        if url is None: return
+
+        board, fn = self.url2fn(url)
+        aidc = self.fn2aidc(fn)
+        pathname = os.path.join("ptt", board)
+        filename = f"{aidc}.{fn}"
+        fullname = os.path.join(pathname, filename)
+        try:
+            with open(fullname, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            lines = []
+        try:
+            if len(lines) == 0: os.makedirs(pathname, mode=0o775, exist_ok=True)
+            with open(fullname, "w", encoding="utf-8") as f:
+                write(lines, f)
+                print("Write", os.path.join(pathname, filename), "bytes", f.tell())
+        except Exception as e:
+            print(f"Failed to save {fullname}:\n", e)
+
+    def enableSaveOnSwitch(self, enabled=True):
+        self.saveOnSwitch = enabled
+
+    def switch(self):
+        if not hasattr(self, "saveOnSwitch") or self.saveOnSwitch:
+            self.saveToFile()
+        self.clear()
+
+    def isSwitchEvent(self, event: UserEvent):
+        return (event is not None) and ( \
+               (event == UserEvent.Key_Up and self.atBegin) or \
+               (event == UserEvent.Key_Down and self.atEnd) or \
+               (event == UserEvent.Key_Left) or \
+               (chr(event) in "qfb]+[-=tAa") )
 
     # FN: filename
     # AIDu: uncompressed article number
@@ -144,19 +233,6 @@ class PttThread:
         aidc += self.ENCODE[lo & 0x3f]
         return aidc
 
-    def show(self):
-        url = self.scanURL()
-        print("\nThread lines:", self.lastViewed, "url:", url)
-        if url:
-            board, fn = self.url2fn(url)
-            aidc = self.fn2aidc(fn)
-            print("board:", board, "fn:", fn, "aidc:", aidc)
-        if self.lastViewed < 50:
-            print(self.text())
-        else:
-            print(self.text(1, 3))
-            print(self.text(-3))
-        print()
 
 def showScreen(screen):
     lines = screen.display
@@ -166,13 +242,6 @@ def showScreen(screen):
 
 def showCursor(screen):
     print("Cursor:", screen.cursor.y, screen.cursor.x, "'%s'" % screen.display[screen.cursor.y])
-
-
-class UserEvent:
-    Key_Up = 1
-    Key_Down = 2
-    Key_Right = 3
-    Key_Left = 4
 
 
 class ProxyFlow:
@@ -206,6 +275,7 @@ class PttTerm:
     def reset(self):
         self.flow = None
         self.state = self._State.Unknown
+        self.event = UserEvent.Unknown
         if hasattr(self, "thread"):
             self.thread.clear()
         if hasattr(self, "macro_task") and not self.macro_task.done():
@@ -222,6 +292,10 @@ class PttTerm:
         print("state:", self.state)
         if hasattr(self, "macro_event"): print("macro event:", self.macro_event)
         if hasattr(self, "macro_task"): print("macro task:", self.macro_task)
+        if self.state == self._State.InThread:
+            self.thread.show(False)
+
+    def showThread(self):
         if self.state == self._State.InThread:
             self.thread.show()
 
@@ -243,13 +317,24 @@ class PttTerm:
     def runPmoreConfig(self):
         if hasattr(self, "macro_task") and not self.macro_task.done():
             self.macro_task.cancel()
+            while not self.macro_task.done():
+                sleep(0.1)
+
+        self.thread.enableSaveOnSwitch(False)
         self.macro_event = asyncio.Event()
         self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event))
 
-    def refreshScreen(self):
+    def pre_refresh(self):
+        if self.state == self._State.InBoard and self.event in [UserEvent.Key_Right, UserEvent.Key_Enter]:
+            showCursor(self.screen)     # entering a thread
+
+        if self.state == self._State.InThread and self.thread.isSwitchEvent(self.event):
+            self.thread.switch()
+
+    def post_refresh(self):
         newState = self._refresh()
 
-        if newState == self._State.Waiting or newState == self._State.Unknown:
+        if newState in [self._State.Waiting, self._State.Unknown]:
             # TODO: screen already changed but state remains
             if hasattr(self, "macro_task") and not self.macro_task.done():
                 self.macro_event.set()
@@ -258,8 +343,9 @@ class PttTerm:
         prevState = self.state
         self.state = newState
 
+        # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
-            self.thread.clear()
+            self.thread.switch()
 
         if not hasattr(self, "macro_task"):
             if prevState == self._State.Unknown and newState == self._State.InPanel:
@@ -314,23 +400,14 @@ class PttTerm:
                 except (AttributeError, IndexError):
                     print("Title missing: '%s'" % lines[1])
 
-            self.thread.markBegin(firstLine == 1)
-            self.thread.markEnd(percent == 100)
-            self.thread.view(self.screen.display[0:-1], firstLine, lastLine)
+            self.thread.view(self.screen.display[0:-1], firstLine, lastLine, percent == 100)
             return self._State.InThread
 
         return self._State.Unknown
 
     def userEvent(self, event: UserEvent):
-        print("User event:", event)
-        if event == UserEvent.Key_Up and \
-           self.state == self._State.InThread and \
-           self.thread.isBegin():
-            self.thread.clear()
-        elif event == UserEvent.Key_Down and \
-             self.state == self._State.InThread and \
-             self.thread.isEnd():
-            self.thread.clear()
+        print("User event:", UserEvent.name(event))
+        self.event = event
 
     # return value:
     #   False: to break
@@ -410,6 +487,9 @@ class PttTerm:
                 break
             i += 1
 
+        if macros is self.macros_pmore_config:
+            self.thread.enableSaveOnSwitch(True)
+
         print("run_macro task finished!")
 
 class SniffWebSocket:
@@ -425,7 +505,6 @@ class SniffWebSocket:
         self.pttTerm = PttTerm(self.screen)
 
     def reset(self):
-        self.lastServerMsgTime = -1
         self.server_msgs = bytes()
         if hasattr(self, "screen"):
             self.screen.reset()
@@ -450,13 +529,14 @@ class SniffWebSocket:
     def on_SIGUSR2(self):
         showScreen(self.screen)
         if hasattr(self, "pttTerm"):
-            self.pttTerm.runPmoreConfig()
+            self.pttTerm.showThread()
 
     def purge_server_message(self):
         if len(self.server_msgs):
+            self.pttTerm.pre_refresh()
             self.stream.feed(self.server_msgs.decode("big5uao", 'replace'))
             self.server_msgs = bytes()
-            self.pttTerm.refreshScreen()
+            self.pttTerm.post_refresh()
 
     def server_message(self, content):
         n = len(content)
@@ -484,13 +564,33 @@ class SniffWebSocket:
             self.server_event.clear()
             self.purge_server_message()
 
+        if len(content) == 1 and UserEvent.isViewable(content[0]):
+            self.pttTerm.userEvent(content[0])
+            return
+        else:
+            # need to reset userEvent for unknown keys otherwise PttTerm.pre_refresh() would go wrong
+            self.pttTerm.userEvent(UserEvent.Unknown)
+
+        uncommitted = (len(content) > 1 and content[-1] == ord('\r'))
+
+        # VT100 escape
         sESC = '\x1b'
         sCSI = '['
         sNUM = '0'
 
+        # Telnet escape
+        IAC = 0xff
+        SUB = 0xfa
+        NOP = 0xf1
+        SUBEND = 0xf0
+        WINSIZE = 0x1f
+
         state = None
         number = ""
-        for b in content:
+        n = 0
+        while n < len(content):
+            b = content[n]
+
             if state != sNUM:
                 number = ""
 
@@ -499,7 +599,9 @@ class SniffWebSocket:
                 if c == sESC:
                     state = sESC
                 elif c == '\r':
-                    print("Key: Enter")
+                    self.pttTerm.userEvent(UserEvent.Key_Enter)
+                elif b == IAC:
+                    state = IAC
             elif state == sESC:
                 if c == sCSI:
                     state = sCSI
@@ -507,29 +609,57 @@ class SniffWebSocket:
                     state = None
             elif state == sCSI:
                 if 'A' <= c <= 'H':
-                    print("xterm key:", self.xterm_keys[b - ord('A')])
                     if c == 'A':
                         self.pttTerm.userEvent(UserEvent.Key_Up)
+                        if uncommitted: self.screen.cursor_up()
                     elif c == 'B':
                         self.pttTerm.userEvent(UserEvent.Key_Down)
+                        if uncommitted: self.screen.cursor_down()
                     elif c == 'C':
                         self.pttTerm.userEvent(UserEvent.Key_Right)
                     elif c == 'D':
                         self.pttTerm.userEvent(UserEvent.Key_Left)
+                    else:
+                        print("xterm key:", self.xterm_keys[b - ord('A')])
                 elif '0' <= c <= '9':
                     state = sNUM
                     number += c
+                    n += 1
                     continue
                 state = None
             elif state == sNUM:
                 if '0' <= c <= '9':
                     number += c
+                    n += 1
                     continue
                 elif c == '~':
                     number = int(number)
                     if 1 <= number <= len(self.vt_keys):
                         print("vt key:", self.vt_keys[number-1])
                 state = None
+            elif state == IAC:
+                if SUB <= b < IAC:
+                    state = SUB
+                elif b == SUBEND or b == NOP:
+                    state = None
+                else:
+                    break
+            elif state == SUB:
+                if b == WINSIZE:
+                    if n + 4 < len(content):
+                        width  = (content[n+1] << 8) | content[n+2]
+                        height = (content[n+3] << 8) | content[n+4]
+                        print("Window size", width, height)
+                        self.screen.resize(height, width)
+                        n += 4
+                        state = None
+                    else:
+                        break
+                elif 0 <= b <= 3:
+                    state = None
+                else:
+                    break
+            n += 1
 
     async def server_msg_timeout(self, flow, event):
 
@@ -605,21 +735,6 @@ class SniffWebSocket:
         if flow.websocket:
 
             flow_msg = flow.websocket.messages[-1]
-
-            '''
-            if self.lastServerMsgTime < 0:
-                self.lastServerMsgTime = flow_msg.timestamp
-
-            deltaTime = flow_msg.timestamp - self.lastServerMsgTime
-            print("\nMessages: %i (%f @%f)" % (len(flow.websocket.messages), flow_msg.timestamp, deltaTime))
-            self.lastServerMsgTime = flow_msg.timestamp
-
-            dir = "S>" if flow_msg.from_client else "R<"
-            type = "T" if flow_msg.is_text else "B"
-            l = len(flow_msg.text) if flow_msg.is_text else len(flow_msg.content)
-
-            print(dir + "[" + type + "] len %i" % l)
-            '''
 
             if flow_msg.from_client:
                 self.client_message(flow_msg.content)
