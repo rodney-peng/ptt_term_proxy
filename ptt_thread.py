@@ -1,0 +1,211 @@
+import os
+import re
+import time
+
+from uao import register_uao
+register_uao()
+
+from user_event import UserEvent
+
+# a PTT thread being viewed
+class PttThread:
+
+    def __init__(self, filename=None):
+        self.clear()
+
+        if filename:
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    self.lines = [line.rstrip("\n") for line in f.readlines()]
+            except FileNotFoundError:
+                pass
+            self.lastLine = len(self.lines)
+            print("read from ", filename, self.lastLine)
+
+    def clear(self):
+        self.lines = []
+        self.lastLine = 0
+        self.url = None
+        self.atBegin = self.atEnd = False
+        self.firstViewed = self.lastViewed = -1
+        self.elapsedTime = 0
+
+    LINE_HOLDER = chr(0x7f)
+
+    def view(self, lines, first: int, last: int, atEnd: bool):
+        assert 0 < first <= last
+        assert last - first + 1 <= len(lines)
+
+        self.atBegin = (first == 1)
+        self.atEnd = atEnd
+
+        if self.firstViewed < 0: self.firstViewed = time.time()
+
+        if self.lastLine < last:
+            # which is better?
+            #   [self.LINE_HOLDER for _ in range(last - self.lastLine)]
+            #   self.LINE_HOLDER * (last - self.lastLine)
+            self.lines.extend(self.LINE_HOLDER * (last - self.lastLine))
+            self.lastLine = last
+
+#        print("View lines:", first, last, "curr:", len(self.lines), self.lastLine)
+
+        i = 0
+        text = ""
+        while i < len(lines) and first <= last:
+            line = lines[i].rstrip()
+            if len(line.encode("big5uao", "replace")) > 78 and line[-1] == '\\':
+                text += line[0:-1]
+            else:
+                self.lines[first-1] = text + line
+#                print("add [%d]" % first, "'%s'" % self.lines[first-1])
+                text = ""
+                first += 1
+            i += 1
+
+        if text and first <= last:
+            self.lines[first-1] = text
+#            print("add [%d]" % first, "'%s'" % self.lines[first-1])
+            first += 1
+
+        if first <= last:
+            print("\nCaution: line wrap is probably missing!\n")
+
+    def text(self, first = 1, last = -1):
+#        print("text:", first, last, self.lastLine)
+        if first < 0: first = self.lastLine + 1 + first
+        if last < 0: last = self.lastLine + 1 + last
+#        print("text:", first, last, self.lastLine)
+
+        text = ""
+        while 0 < first <= last <= self.lastLine:
+#            print("line [%d]" % first, "'%s'" % self.lines[first-1])
+            text += (self.lines[first-1] + '\n')
+            first += 1
+        return text
+
+    def scanURL(self):
+        if self.lastLine < 3:
+            return None
+        if self.url:
+            return self.url
+
+        i = self.lastLine - 3
+        while i > 0:
+            if self.lines[i] == "--" and \
+               self.lines[i+1].startswith("※ 發信站: 批踢踢實業坊") and \
+               self.lines[i+2].startswith("※ 文章網址:"):
+                self.url = (self.lines[i+2])[7:].strip()
+                return self.url
+            i -= 1
+
+        return None
+
+    def show(self, complete=True):
+        def sec2time(seconds):
+            time_str = ""
+            if seconds // 3600:
+                time_str += "%d hr" % (seconds // 3600)
+                seconds %= 3600
+            if seconds // 60:
+                if time_str: time_str += " "
+                time_str += "%d min" % (seconds // 60)
+                seconds %= 60
+            if time_str: time_str += " "
+            time_str += "%d sec" % seconds
+            return time_str
+
+        url = self.scanURL()
+        print("\nThread lines:", self.lastLine, "url:", url)
+        print("Stayed:", sec2time(self.elapsedTime))
+        if url:
+            board, fn = self.url2fn(url)
+            aidc = self.fn2aidc(fn)
+            print("board:", board, "fn:", fn, "aidc:", aidc)
+        if complete:
+            print(self.text())
+        else:
+            print(self.text(1, 3))
+            print(self.text(-3))
+        print()
+
+    def enablePersistence(self, enabled=True):
+        self.persistence = enabled
+
+    def switch(self, pickler):
+        if self.lastLine == 0: return False
+
+        self.lastViewed = time.time()
+        elapsed = self.lastViewed - self.firstViewed
+        if elapsed > 0: self.elapsedTime = elapsed
+
+        if not hasattr(self, "persistence") or self.persistence:
+            pickler(self)
+
+        self.clear()
+        return True
+
+    def isSwitchEvent(self, event: UserEvent):
+        return (event is not None) and ( \
+               (event == UserEvent.Key_Up and self.atBegin) or \
+               (event == UserEvent.Key_Down and self.atEnd) or \
+               (event == UserEvent.Key_Left) or \
+               (chr(event) in "qfb]+[-=tAa") )
+
+    # FN: filename
+    # AIDu: uncompressed article number
+    # AIDc: compressed article number
+    @staticmethod
+    def url2fn(url):
+        result = re.match("https?://www.ptt.cc/bbs/(.+)/(.+)\.html", url)
+        if not result:
+            return None
+        board = result.group(1)
+        fn    = result.group(2)
+        return board, fn
+
+    ENCODE = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
+    @classmethod
+    def fn2aidc(cls, fn):
+        result = re.match("(.)\.(\d+)\.A\.([0-9A-F]{3})", fn)
+        if not result:
+            return None
+        m = 0 if result.group(1) == 'M' else 1
+        hi = int(result.group(2)) & 0xffffffff
+        lo = int(result.group(3), 16) & 0xfff
+        aidu = (((m << 32) | hi) << 12) | lo
+        aidc = ''
+        aidc += cls.ENCODE[(m << 2) | (hi >> 30)]
+        aidc += cls.ENCODE[(hi >> 24) & 0x3f]
+        aidc += cls.ENCODE[(hi >> 18) & 0x3f]
+        aidc += cls.ENCODE[(hi >> 12) & 0x3f]
+        aidc += cls.ENCODE[(hi >>  6) & 0x3f]
+        aidc += cls.ENCODE[ hi        & 0x3f]
+        aidc += cls.ENCODE[lo >> 6]
+        aidc += cls.ENCODE[lo & 0x3f]
+        return aidc
+
+# A PttThread object will be sent to the persistence server through normal pickling,
+# then the object is merged to a PttThreadPersist object for persistence.
+# A PttThreadPersist object is the accumulated status of the same PttThread objects.
+class PttThreadPersist(PttThread):
+
+    # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def persist(self, persistor):
+        url = self.scanURL()
+        if url is None: return
+
+        board, fn = self.url2fn(url)
+        aidc = self.fn2aidc(fn)
+        filename = f"{aidc}.{fn}"
+
+        persistor(self.lines, board, filename)
+
+

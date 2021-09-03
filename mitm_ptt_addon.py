@@ -10,6 +10,10 @@ from mitmproxy import http, ctx
 from uao import register_uao
 register_uao()
 
+from user_event import UserEvent
+from ptt_thread import PttThread
+from ptt_persist import PttPersist
+
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
 
@@ -31,232 +35,6 @@ class MyDebugStream(pyte.DebugStream):
         # DebugStream inherits ByteStream and feed() takes bytes but not string
         # re-route to Stream.feed()
         super(pyte.ByteStream, self).feed(chars)
-
-
-class UserEvent:
-    Unknown = 0
-    Key_Up = 1
-    Key_Down = 2
-    Key_Right = 3
-    Key_Left = 4
-    Key_Enter = 5
-    # 32 ~ 126 is the same viewable ASCII code
-
-    def isViewable(event: int):
-        return ' ' <= chr(event) <= '~'
-
-    def name(event: int):
-        assert event >= 0
-        return ["-", "Up", "Down", "Right", "Left", "Enter"][event] if event <= UserEvent.Key_Enter else chr(event)
-
-class PttThread:
-
-    def __init__(self):
-        self.clear()
-
-    def clear(self):
-        self.lines = []
-        self.lastViewed = 0
-        self.url = None
-        self.atBegin = self.atEnd = False
-        self.startTime = -1
-
-    LINE_HOLDER = chr(0x7f)
-
-    def view(self, lines, first: int, last: int, atEnd: bool):
-        assert 0 < first <= last
-        assert last - first + 1 <= len(lines)
-
-        self.atBegin = (first == 1)
-        self.atEnd = atEnd
-
-        if self.startTime < 0: self.startTime = time.time()
-
-        if self.lastViewed < last:
-            # which is better?
-            #   [self.LINE_HOLDER for _ in range(last - self.lastViewed)]
-            #   self.LINE_HOLDER * (last - self.lastViewed)
-            self.lines.extend(self.LINE_HOLDER * (last - self.lastViewed))
-            self.lastViewed = last
-
-#        print("View lines:", first, last, "curr:", len(self.lines), self.lastViewed)
-
-        i = 0
-        text = ""
-        while i < len(lines) and first <= last:
-            line = lines[i].rstrip()
-            if len(line.encode("big5uao", "replace")) > 78 and line[-1] == '\\':
-                text += line[0:-1]
-            else:
-                self.lines[first-1] = text + line
-#                print("add [%d]" % first, "'%s'" % self.lines[first-1])
-                text = ""
-                first += 1
-            i += 1
-
-        if text and first <= last:
-            self.lines[first-1] = text
-#            print("add [%d]" % first, "'%s'" % self.lines[first-1])
-            first += 1
-
-        if first <= last:
-            print("\nCaution: line wrap is probably missing!\n")
-
-    def text(self, first = 1, last = -1):
-#        print("text:", first, last, self.lastViewed)
-        if first < 0: first = self.lastViewed + 1 + first
-        if last < 0: last = self.lastViewed + 1 + last
-#        print("text:", first, last, self.lastViewed)
-
-        text = ""
-        while 0 < first <= last <= self.lastViewed:
-#            print("line [%d]" % first, "'%s'" % self.lines[first-1])
-            text += (self.lines[first-1] + '\n')
-            first += 1
-        return text
-
-    def scanURL(self):
-        if self.lastViewed < 3:
-            return None
-        if self.url:
-            return self.url
-
-        i = self.lastViewed - 3
-        while i > 0:
-            if self.lines[i] == "--" and \
-               self.lines[i+1].startswith("※ 發信站: 批踢踢實業坊") and \
-               self.lines[i+2].startswith("※ 文章網址:"):
-                self.url = (self.lines[i+2])[7:].strip()
-                return self.url
-            i -= 1
-
-        return None
-
-    def show(self, complete=True):
-        url = self.scanURL()
-        print("\nThread lines:", self.lastViewed, "url:", url)
-        if url:
-            board, fn = self.url2fn(url)
-            aidc = self.fn2aidc(fn)
-            print("board:", board, "fn:", fn, "aidc:", aidc)
-        if complete:
-            print(self.text())
-        else:
-            print(self.text(1, 3))
-            print(self.text(-3))
-
-        print()
-
-    def saveToFile(self):
-        def write(lines, f):
-            '''
-            merge new and existing content:
-            if new line is not empty(has LINE_HOLDER only), always overwrites existing one
-            otherwise skip to the next line
-            '''
-            existing = len(lines)
-            for n, text in enumerate(self.lines):
-                if text != self.LINE_HOLDER:
-                    f.write(text + '\n')
-                elif n < existing:
-                    f.write(lines[n])
-                else:
-                    f.write('\n')
-
-            n += 1
-            print("Write new lines:", n)
-            while n < existing:
-                f.write(lines[n])
-                n += 1
-            print("Write total lines:", n)
-
-        url = self.scanURL()
-        if url is None: return
-
-        board, fn = self.url2fn(url)
-        aidc = self.fn2aidc(fn)
-        pathname = os.path.join("ptt", board)
-        filename = f"{aidc}.{fn}"
-        fullname = os.path.join(pathname, filename)
-        try:
-            with open(fullname, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        except FileNotFoundError:
-            lines = []
-        try:
-            if len(lines) == 0: os.makedirs(pathname, mode=0o775, exist_ok=True)
-            with open(fullname, "w", encoding="utf-8") as f:
-                write(lines, f)
-                print("Write", os.path.join(pathname, filename), "bytes", f.tell())
-        except Exception as e:
-            print(f"Failed to save {fullname}:\n", e)
-
-    def enableSaveOnSwitch(self, enabled=True):
-        self.saveOnSwitch = enabled
-
-    def switch(self):
-        def sec2time(seconds):
-            time_str = ""
-            if seconds // 3600:
-                time_str += "%d hr" % (seconds // 3600)
-                seconds %= 3600
-            if seconds // 60:
-                if time_str: time_str += " "
-                time_str += "%d min" % (seconds // 60)
-                seconds %= 60
-            if time_str: time_str += " "
-            time_str += "%d sec" % seconds
-            return time_str
-
-        if self.lastViewed == 0: return
-
-        elapsed = time.time() - self.startTime
-        if elapsed > 0: print("Elapsed:", sec2time(int(elapsed)))
-
-        if not hasattr(self, "saveOnSwitch") or self.saveOnSwitch:
-            self.saveToFile()
-
-        self.clear()
-
-    def isSwitchEvent(self, event: UserEvent):
-        return (event is not None) and ( \
-               (event == UserEvent.Key_Up and self.atBegin) or \
-               (event == UserEvent.Key_Down and self.atEnd) or \
-               (event == UserEvent.Key_Left) or \
-               (chr(event) in "qfb]+[-=tAa") )
-
-    # FN: filename
-    # AIDu: uncompressed article number
-    # AIDc: compressed article number
-    def url2fn(self, url=None):
-        if not url:
-            url = self.url
-        result = re.match("https?://www.ptt.cc/bbs/(.+)/(.+)\.html", url)
-        if not result:
-            return None
-        board = result.group(1)
-        fn    = result.group(2)
-        return board, fn
-
-    ENCODE = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
-    def fn2aidc(self, fn):
-        result = re.match("(.)\.(\d+)\.A\.([0-9A-F]{3})", fn)
-        if not result:
-            return None
-        m = 0 if result.group(1) == 'M' else 1
-        hi = int(result.group(2)) & 0xffffffff
-        lo = int(result.group(3), 16) & 0xfff
-        aidu = (((m << 32) | hi) << 12) | lo
-        aidc = ''
-        aidc += self.ENCODE[(m << 2) | (hi >> 30)]
-        aidc += self.ENCODE[(hi >> 24) & 0x3f]
-        aidc += self.ENCODE[(hi >> 18) & 0x3f]
-        aidc += self.ENCODE[(hi >> 12) & 0x3f]
-        aidc += self.ENCODE[(hi >>  6) & 0x3f]
-        aidc += self.ENCODE[ hi        & 0x3f]
-        aidc += self.ENCODE[lo >> 6]
-        aidc += self.ENCODE[lo & 0x3f]
-        return aidc
 
 
 def showScreen(screen):
@@ -292,10 +70,16 @@ class PttTerm:
         InBoard = 3
         InThread = 4
 
+    persistor = PttPersist()
+
     def __init__(self, screen):
         self.reset()
         self.screen = screen
         self.thread = PttThread()
+
+        if not self.persistor.is_connected():
+            self.persistor.connect()
+        print("persistor:", self.persistor.is_connected())
 
     def reset(self):
         self.flow = None
@@ -307,8 +91,9 @@ class PttTerm:
             self.macro_task.cancel()
             del self.macro_task
 
-    def flowStarted(self, flow: ProxyFlow):
+    def flowStarted(self, flow: ProxyFlow, from_file: bool):
         self.flow = flow
+        self.read_flow = from_file
 
     def flowStopped(self):
         self.flow = None
@@ -319,6 +104,7 @@ class PttTerm:
         if hasattr(self, "macro_task"): print("macro task:", self.macro_task)
         if self.state == self._State.InThread:
             self.thread.show(False)
+        print("persistor:", self.persistor.is_connected())
 
     def showThread(self):
         if self.state == self._State.InThread:
@@ -345,16 +131,22 @@ class PttTerm:
             while not self.macro_task.done():
                 time.sleep(0.1)
 
-        self.thread.enableSaveOnSwitch(False)
+        self.thread.enablePersistence(False)
         self.macro_event = asyncio.Event()
         self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event))
+
+    def persistThread(self, thread):
+        if not self.persistor.is_connected():
+            self.persistor.connect()
+        if self.persistor.is_connected():
+            self.persistor.send(thread, PttPersist.TYPE_THREAD)
 
     def pre_refresh(self):
         if self.state == self._State.InBoard and self.event in [UserEvent.Key_Right, UserEvent.Key_Enter]:
             showCursor(self.screen)     # entering a thread
 
         if self.state == self._State.InThread and self.thread.isSwitchEvent(self.event):
-            self.thread.switch()
+            self.thread.switch(self.persistThread)
 
     def post_refresh(self):
         newState = self._refresh()
@@ -370,12 +162,13 @@ class PttTerm:
 
         # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
-            self.thread.switch()
+            self.thread.switch(self.persistThread)
 
-        if not hasattr(self, "macro_task"):
+        # if flow is read from file, don't run macro
+        if not self.read_flow and not hasattr(self, "macro_task"):
             if prevState == self._State.Unknown and newState == self._State.InPanel:
                 self.runPmoreConfig()
-        elif not self.macro_task.done():
+        elif hasattr(self, "macro_task") and not self.macro_task.done():
             self.macro_event.set()
 
     def _refresh(self):
@@ -541,14 +334,13 @@ class PttTerm:
             i += 1
 
         if macros is self.macros_pmore_config:
-            self.thread.enableSaveOnSwitch(True)
+            self.thread.enablePersistence(True)
 
         print("run_macro task finished!")
 
 class SniffWebSocket:
 
     def __init__(self):
-        print("SniffWebSocket v1")
         self.reset()
 
         self.screen = MyScreen(128, 32)
@@ -717,22 +509,22 @@ class SniffWebSocket:
             n += 1
 
     async def server_msg_timeout(self, flow, event):
-
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
-        while flow.websocket.timestamp_end is None:
+        cancelled = False
+        while (flow.websocket.timestamp_end is None) and not cancelled:
             try:
                 await event.wait()
             except asyncio.CancelledError:
-                break
+                cancelled = True
             except Exception as e:
                 print("server_msg_timeout wait exception\n", e)
 
             rcv_len = len(self.server_msgs)
-            while True:
+            while not cancelled:
                 try:
                     await asyncio.sleep(0.1)
                 except asyncio.CancelledError:
-                    return
+                    cancalled = True
                 except Exception as e:
                     print("server_msg_timeout sleep exception\n", e)
 
@@ -751,82 +543,72 @@ class SniffWebSocket:
     # Addon management
 
     def load(self, loader):
-        print("SniffWebSocket loading", loader)
+        print("SniffWebSocket loading!")
+        self.log_verbosity = "info"
+        self.flow_detail = 1
+        self.read_flow = False
 
     def configure(self, updated):
-        print("SniffWebSocket configuring", updated)
+        print("SniffWebSocket configure updated! options:", updated)
+        if 'termlog_verbosity' in updated: self.log_verbosity = ctx.options.termlog_verbosity
+        if 'flow_detail' in updated: self.flow_detail = ctx.options.flow_detail
+        if 'rfile' in updated: self.read_flow = True
 
     def running(self):
         print("SniffWebSocket running!")
         self.is_running = True
+        print("log_verbosity:", self.log_verbosity)
+        print("flow_detail:", self.flow_detail)
 
     def done(self):
         print("SniffWebSocket done!")
+        if hasattr(self, "server_task") and not self.server_task.done():
+            self.server_task.cancel()
+            while not self.server_task.done():
+                time.sleep(0.1)
 
     # Websocket lifecycle
 
-    def websocket_handshake(self, flow: http.HTTPFlow):
-        """
-
-            Called when a client wants to establish a WebSocket connection. The
-
-            WebSocket-specific headers can be manipulated to alter the
-
-            handshake. The flow object is guaranteed to have a non-None request
-
-            attribute.
-
-        """
-        print("websocket_handshake")
-
     def websocket_start(self, flow: http.HTTPFlow):
-        """
-
-            A websocket connection has commenced.
-
-        """
         print("websocket_start")
         self.server_event = asyncio.Event()
         self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-        self.pttTerm.flowStarted(ProxyFlow(ctx.master, flow))
+        self.pttTerm.flowStarted(ProxyFlow(ctx.master, flow), self.read_flow)
+
+    def websocket_end(self, flow: http.HTTPFlow):
+        print("websocket_end")
+        self.reset()
 
     def websocket_message(self, flow: http.HTTPFlow):
         """
-
             Called when a WebSocket message is received from the client or
-
             server. The most recent message will be flow.messages[-1]. The
-
             message is user-modifiable. Currently there are two types of
-
             messages, corresponding to the BINARY and TEXT frame types.
-
         """
-        if flow.websocket:
+        assert flow.websocket
 
-            flow_msg = flow.websocket.messages[-1]
+        flow_msg = flow.websocket.messages[-1]
+        if flow_msg.from_client:
+            self.client_message(flow_msg.content)
+        else:
+            self.server_message(flow_msg.content)
 
-            if flow_msg.from_client:
-                self.client_message(flow_msg.content)
-            else:
-                self.server_message(flow_msg.content)
+    def websocket_handshake(self, flow: http.HTTPFlow):
+        """
+            Called when a client wants to establish a WebSocket connection. The
+            WebSocket-specific headers can be manipulated to alter the
+            handshake. The flow object is guaranteed to have a non-None request
+            attribute.
+        """
+        print("websocket_handshake")
 
     def websocket_error(self, flow: http.HTTPFlow):
         """
-
             A websocket connection has had an error.
-
         """
         print("websocket_error", flow)
 
-    def websocket_end(self, flow: http.HTTPFlow):
-        """
-
-            A websocket connection has ended.
-
-        """
-        print("websocket_end")
-        self.reset()
 
 addons = [
     SniffWebSocket()
