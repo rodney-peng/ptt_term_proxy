@@ -47,18 +47,53 @@ class myDumpMaster(DumpMaster):
         self.sniffers = sniffers
         self.addons.add(*sniffers)
 
-    async def watch_server(self):
+    async def conn_watcher(self):
         server = self.addons.get("proxyserver")
         print(server)
 
         while True:
-            await asyncio.sleep(TimeoutWatchdog.CONNECTION_TIMEOUT // 2)
+            try:
+                await asyncio.sleep(TimeoutWatchdog.CONNECTION_TIMEOUT // 2)
+            except asyncio.CancelledError:
+                break
 
             for conn in server._connections.values():
                 # kick watchdog by calling disarm()
                 with conn.timeout_watchdog.disarm():
                     pass
                 self._watchdog_time = conn.timeout_watchdog.last_activity
+        print("conn_watcher finished!")
+
+    async def reload_watcher(self, event):
+#        from importlib import reload
+        print("Reload watcher started!")
+        while True:
+            try:
+                await event.wait()
+            except asyncio.CancelledError:
+                break
+            else:
+                print("clear reload event!")
+                event.clear()
+
+            print("Reload addon!")
+            if self.sniffers:
+                for addon in self.sniffers:
+                    self.addons.remove(addon)
+                del self.sniffers
+
+#            reload(SniffWebSocket)
+#            print(SniffWebSocket)
+            self.add_sniffer(*[SniffWebSocket()])
+
+        print("reload_watcher finished!")
+
+    def start_watcher(self):
+        asyncio.ensure_future(self.conn_watcher())
+
+# TODO: can reload the sniffer addon on SIGUSR2
+#        self.reload_event = asyncio.Event()
+#        asyncio.ensure_future(self.reload_watcher(self.reload_event))
 
 print("PID", os.getpid())
 
@@ -73,7 +108,7 @@ master = myDumpMaster(opts)
 from mitm_ptt_addon import addons as ptt_sniffers
 master.add_sniffer(*ptt_sniffers)
 
-asyncio.ensure_future(master.watch_server())
+master.start_watcher()
 
 parser = cmdline.mitmdump(opts)
 

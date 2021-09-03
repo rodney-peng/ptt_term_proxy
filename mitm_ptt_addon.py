@@ -3,7 +3,7 @@ import os
 import re
 import pyte
 import asyncio
-from time import sleep
+import time
 
 from mitmproxy import http, ctx
 
@@ -59,12 +59,18 @@ class PttThread:
         self.lastViewed = 0
         self.url = None
         self.atBegin = self.atEnd = False
+        self.startTime = -1
 
     LINE_HOLDER = chr(0x7f)
 
     def view(self, lines, first: int, last: int, atEnd: bool):
+        assert 0 < first <= last
+        assert last - first + 1 <= len(lines)
+
         self.atBegin = (first == 1)
         self.atEnd = atEnd
+
+        if self.startTime < 0: self.startTime = time.time()
 
         if self.lastViewed < last:
             # which is better?
@@ -73,7 +79,7 @@ class PttThread:
             self.lines.extend(self.LINE_HOLDER * (last - self.lastViewed))
             self.lastViewed = last
 
-        print("View lines:", first, last, "curr:", len(self.lines), self.lastViewed)
+#        print("View lines:", first, last, "curr:", len(self.lines), self.lastViewed)
 
         i = 0
         text = ""
@@ -189,8 +195,27 @@ class PttThread:
         self.saveOnSwitch = enabled
 
     def switch(self):
+        def sec2time(seconds):
+            time_str = ""
+            if seconds // 3600:
+                time_str += "%d hr" % (seconds // 3600)
+                seconds %= 3600
+            if seconds // 60:
+                if time_str: time_str += " "
+                time_str += "%d min" % (seconds // 60)
+                seconds %= 60
+            if time_str: time_str += " "
+            time_str += "%d sec" % seconds
+            return time_str
+
+        if self.lastViewed == 0: return
+
+        elapsed = time.time() - self.startTime
+        if elapsed > 0: print("Elapsed:", sec2time(int(elapsed)))
+
         if not hasattr(self, "saveOnSwitch") or self.saveOnSwitch:
             self.saveToFile()
+
         self.clear()
 
     def isSwitchEvent(self, event: UserEvent):
@@ -302,12 +327,12 @@ class PttTerm:
     macros_pmore_config = [
 #        {'data': b' ', 'state': _State.Unknown},
         {'data': b'\x1a', 'state': _State.InPanel}, # Ctrl-Z
-        {'data': b'b', 'state': [_State.InPanel, _State.InBoard]},   # will send to the board SYSOP for the first time
-        {'data': b' ', 'state': _State.InBoard, 'timeout': True},    # skips the onboarding screen otherwise allows timeout
-        {'data': b'\r', 'state': _State.InThread},  # enters the thread in focus
+        {'data': b'b', 'state': [_State.InPanel, _State.InBoard]},   # will send to the board SYSOP if no board is viewed previously
+        {'data': b' ', 'state': _State.InBoard, 'timeout': True},    # skips the onboarding screen or allows timeout
+        {'data': b'\r', 'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A', 'retry': 5},  # enters the thread at cursor or retry after cursor Up
         {'data': b'o', 'state': _State.InThread},   # enters thread browser config
-        {'data': b'm', 'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3},
-        {'data': b'l', 'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},
+        {'data': b'm', 'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
+        {'data': b'l', 'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},   # 文章標頭分隔線: 無
         {'data': b' ', 'state': _State.InThread},   # ends config
         {'data': b'\x1b[D', 'state': _State.InBoard},   # Left and leaves the thread
         {'data': b'\x1a', 'state': _State.InBoard},     # Ctrl-Z
@@ -318,7 +343,7 @@ class PttTerm:
         if hasattr(self, "macro_task") and not self.macro_task.done():
             self.macro_task.cancel()
             while not self.macro_task.done():
-                sleep(0.1)
+                time.sleep(0.1)
 
         self.thread.enableSaveOnSwitch(False)
         self.macro_event = asyncio.Event()
@@ -412,8 +437,9 @@ class PttTerm:
     # return value:
     #   False: to break
     #   True:  to continue
+    #   bytes: priority data to send
     #   None:  to loop normally
-    def handle_macro_event(self, macro):
+    def handle_macro_event(self, macro, timeout, priority):
         if isinstance(macro['state'], list):
             if self.state not in macro['state']:
                 print("expected state", macro['state'], "but", self.state)
@@ -421,11 +447,29 @@ class PttTerm:
         elif self.state != macro['state']:
             print("expected state", macro['state'], "but", self.state)
             return False
+
+        if 'timeout' in macro and 'retry' in macro and isinstance(macro['timeout'], bytes):
+            if timeout or priority:
+                if self.macro_retry < 0: self.macro_retry = macro['retry']
+                if self.macro_retry > 0:
+                    print("retry", self.macro_retry)
+                    if not priority:
+                        self.macro_retry -= 1
+                        return macro['timeout']
+                    else:
+                        return True
+                else:
+                    print("Reach maximum retry!")
+                    self.macro_retry = -1
+                    return False
+            else:
+                self.macro_retry = -1
+
         if 'row' in macro and 'pattern' in macro and 'retry' in macro:
             if re.search(macro['pattern'], self.screen.display[macro['row']]) is None:
                 if self.macro_retry < 0: self.macro_retry = macro['retry']
-                print("retry", self.macro_retry)
                 if self.macro_retry > 0:
+                    print("retry", self.macro_retry)
                     self.macro_retry -= 1
                     return True
                 else:
@@ -435,11 +479,13 @@ class PttTerm:
             else:
                 print("found", macro['pattern'])
                 self.macro_retry = -1
+
         return None
 
     # macros is list of {data, expected states} pairs, see macros_pmore_config above
     async def run_macro(self, macros, event):
         self.macro_retry = -1
+        prio_data = None
         i = 0
         while i < len(macros):
             await asyncio.sleep(0.5)
@@ -447,7 +493,7 @@ class PttTerm:
             assert ('data' in macro and 'state' in macro)
             if self.flow:
                 try:
-                    self.flow.sendToServer(macro['data'])
+                    self.flow.sendToServer(prio_data if prio_data else macro['data'])
                 except Exception as e:
                     print("sendToServer exception:\n", e)
                     break
@@ -455,12 +501,14 @@ class PttTerm:
                 print("ProxyFlow is unavailable!")
                 break
 
+            timeout = False
             try:
                 await asyncio.wait_for(event.wait(), 1.0)
             except asyncio.TimeoutError:
                 if 'timeout' in macro and macro['timeout']:
-                    # pretend event is set and proceed
+                    # ignore timeout and proceed
                     event.set()
+                    timeout = True
                 else:
                     print("macro event timeout!")
                     break
@@ -474,17 +522,22 @@ class PttTerm:
             if event.is_set():
                 event.clear()
                 try:
-                    next = self.handle_macro_event(macro)
+                    next = self.handle_macro_event(macro, timeout, prio_data is not None)
                 except Exception as e:
-                    print(e)
+                    print("handle_macro_event:\n", e)
                     break
                 if next is True:
+                    prio_data = None
                     continue
                 elif next is False:
                     break
+                elif isinstance(next, bytes):
+                    prio_data = next
+                    continue
             else:
                 print("macro event is not set")
                 break
+            prio_data = None
             i += 1
 
         if macros is self.macros_pmore_config:
@@ -495,6 +548,7 @@ class PttTerm:
 class SniffWebSocket:
 
     def __init__(self):
+        print("SniffWebSocket v1")
         self.reset()
 
         self.screen = MyScreen(128, 32)
@@ -529,6 +583,7 @@ class SniffWebSocket:
     def on_SIGUSR2(self):
         showScreen(self.screen)
         if hasattr(self, "pttTerm"):
+#            self.pttTerm.runPmoreConfig()
             self.pttTerm.showThread()
 
     def purge_server_message(self):
@@ -668,7 +723,7 @@ class SniffWebSocket:
             try:
                 await event.wait()
             except asyncio.CancelledError:
-                return
+                break
             except Exception as e:
                 print("server_msg_timeout wait exception\n", e)
 
@@ -692,6 +747,21 @@ class SniffWebSocket:
                 self.purge_server_message()
 
         print("server_msg_timeout() finished")
+
+    # Addon management
+
+    def load(self, loader):
+        print("SniffWebSocket loading", loader)
+
+    def configure(self, updated):
+        print("SniffWebSocket configuring", updated)
+
+    def running(self):
+        print("SniffWebSocket running!")
+        self.is_running = True
+
+    def done(self):
+        print("SniffWebSocket done!")
 
     # Websocket lifecycle
 
