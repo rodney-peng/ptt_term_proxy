@@ -13,24 +13,39 @@ class PttThread:
     def __init__(self, filename=None):
         self.clear()
 
-        if filename:
-            try:
-                with open(filename, "r", encoding="utf-8") as f:
-                    self.lines = [line.rstrip("\n") for line in f.readlines()]
-            except FileNotFoundError:
-                pass
-            self.lastLine = len(self.lines)
-            print("read from ", filename, self.lastLine)
+        if filename and self.loadContent(filename):
+            self.scanURL()
+            print("read from ", filename, "lines", self.lastLine, "url:", self.url)
 
     def clear(self):
         self.lines = []
         self.lastLine = 0
         self.url = None
         self.atBegin = self.atEnd = False
-        self.firstViewed = self.lastViewed = -1
+        self.firstViewed = self.lastViewed = 0
         self.elapsedTime = 0
 
+    def loadContent(self, filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                self.lines = [line.rstrip("\n") for line in f.readlines()]
+        except FileNotFoundError:
+            return False
+        else:
+            self.lastLine = len(self.lines)
+            print("Load from ", filename, "lines:", self.lastLine)
+            return True
+
     LINE_HOLDER = chr(0x7f)
+
+    def saveContent(self, filename):
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                for line in self.lines:
+                    f.write((line if line != self.LINE_HOLDER else '') + '\n')
+                print("Write", filename, "bytes", f.tell())
+        except Exception as e:
+            print(f"Failed to save {filename}:\n", e)
 
     def view(self, lines, first: int, last: int, atEnd: bool):
         assert 0 < first <= last
@@ -39,7 +54,7 @@ class PttThread:
         self.atBegin = (first == 1)
         self.atEnd = atEnd
 
-        if self.firstViewed < 0: self.firstViewed = time.time()
+        if self.firstViewed == 0: self.firstViewed = time.time()
 
         if self.lastLine < last:
             # which is better?
@@ -117,7 +132,9 @@ class PttThread:
 
         url = self.scanURL()
         print("\nThread lines:", self.lastLine, "url:", url)
-        print("Stayed:", sec2time(self.elapsedTime))
+        if self.firstViewed: print("firstViewed:", time.ctime(self.firstViewed))
+        if self.lastViewed:  print("lastViewed:", time.ctime(self.lastViewed))
+        print("Elapsed:", sec2time(self.elapsedTime))
         if url:
             board, fn = self.url2fn(url)
             aidc = self.fn2aidc(fn)
@@ -129,11 +146,17 @@ class PttThread:
             print(self.text(-3))
         print()
 
+    # don't switch thread by Up/Down at first/last line
+    def is_prohibited(self, event: UserEvent):
+        return (event == UserEvent.Key_Up and self.atBegin) or \
+               (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd)
+
     def enablePersistence(self, enabled=True):
         self.persistence = enabled
 
     def switch(self, pickler):
         if self.lastLine == 0: return False
+        assert self.firstViewed > 0
 
         self.lastViewed = time.time()
         elapsed = self.lastViewed - self.firstViewed
@@ -146,11 +169,60 @@ class PttThread:
         return True
 
     def isSwitchEvent(self, event: UserEvent):
-        return (event is not None) and ( \
-               (event == UserEvent.Key_Up and self.atBegin) or \
-               (event == UserEvent.Key_Down and self.atEnd) or \
+        return (event is not None) and \
+               (not self.is_prohibited(event)) and ( \
                (event == UserEvent.Key_Left) or \
                (chr(event) in "qfb]+[-=tAa") )
+
+    def mergedLines(self, lines, newline=False):
+        '''
+        merge with existing content:
+        if new content line is not empty(has LINE_HOLDER only), always overwrites existing one
+            otherwise skip to the next line.
+        '''
+        def filter(line):
+            if len(line):
+                if newline and line[-1] != '\n':
+                    line += '\n'
+                elif not newline and line[-1] == '\n':
+                    line = line.rstrip('\n')
+            else:
+                line = ('\n' if newline else self.LINE_HOLDER)
+            return line
+
+        existing = len(lines)
+        for n, text in enumerate(self.lines):
+            if text != self.LINE_HOLDER:
+                yield filter(text)
+            elif n < existing:
+                yield filter(lines[n])
+            else:
+                yield filter('')
+
+        if len(self.lines) == 0:
+            n = 0
+        else:
+            n += 1
+        print("new lines:", n)
+        while n < existing:
+            yield filter(lines[n])
+            n += 1
+        print("total lines:", n)
+
+
+    # Article IDentification System
+    # https://github.com/ptt/pttbbs/blob/master/docs/aids.txt
+    def aids(self):
+        url = self.scanURL()
+        if url is None: return None
+
+        board_fn = self.url2fn(url)
+        if board_fn is None: return None
+
+        aidc = self.fn2aidc(board_fn[1])
+        if aidc is None: return None
+
+        return url, board_fn[0], board_fn[1], aidc
 
     # FN: filename
     # AIDu: uncompressed article number
@@ -158,8 +230,8 @@ class PttThread:
     @staticmethod
     def url2fn(url):
         result = re.match("https?://www.ptt.cc/bbs/(.+)/(.+)\.html", url)
-        if not result:
-            return None
+        if not result: return None
+
         board = result.group(1)
         fn    = result.group(2)
         return board, fn
@@ -168,8 +240,8 @@ class PttThread:
     @classmethod
     def fn2aidc(cls, fn):
         result = re.match("(.)\.(\d+)\.A\.([0-9A-F]{3})", fn)
-        if not result:
-            return None
+        if not result: return None
+
         m = 0 if result.group(1) == 'M' else 1
         hi = int(result.group(2)) & 0xffffffff
         lo = int(result.group(3), 16) & 0xfff
@@ -191,21 +263,31 @@ class PttThread:
 class PttThreadPersist(PttThread):
 
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
+    # called upon pickling
     def __getstate__(self):
         state = self.__dict__.copy()
+        del state['lines']
         return state
 
+    # called upon construction or unpickling
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self.lines = []
 
-    def persist(self, persistor):
-        url = self.scanURL()
-        if url is None: return
+    def view(self, lines, first: int, last: int, atEnd: bool):
+        raise AssertionError("Viewing a persistent thread is invalid!")
 
-        board, fn = self.url2fn(url)
-        aidc = self.fn2aidc(fn)
-        filename = f"{aidc}.{fn}"
+    def text(self, first = 1, last = -1):
+        return "<empty>" if len(self.lines) == 0 else super().text(first, last)
 
-        persistor(self.lines, board, filename)
+    def merge(self, thread):
+        self.lines = [line for line in self.mergedLines(thread.lines)]
+        self.lastLine = len(self.lines)
+        self.url = thread.url
+
+        if self.firstViewed == 0:
+            self.firstViewed = thread.firstViewed
+        self.lastViewed = thread.lastViewed
+        self.elapsedTime += thread.elapsedTime
 
 

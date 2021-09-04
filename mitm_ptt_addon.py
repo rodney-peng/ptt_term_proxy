@@ -223,9 +223,17 @@ class PttTerm:
 
         return self._State.Unknown
 
+    # the client message will be dropped if false is returned
     def userEvent(self, event: UserEvent):
         print("User event:", UserEvent.name(event))
+
+        if event != UserEvent.Unknown and \
+           self.state == self._State.InThread and \
+           self.thread.is_prohibited(event):
+            return False
+
         self.event = event
+        return True
 
     # return value:
     #   False: to break
@@ -412,8 +420,7 @@ class SniffWebSocket:
             self.purge_server_message()
 
         if len(content) == 1 and UserEvent.isViewable(content[0]):
-            self.pttTerm.userEvent(content[0])
-            return
+            return self.pttTerm.userEvent(content[0])
         else:
             # need to reset userEvent for unknown keys otherwise PttTerm.pre_refresh() would go wrong
             self.pttTerm.userEvent(UserEvent.Unknown)
@@ -446,7 +453,7 @@ class SniffWebSocket:
                 if c == sESC:
                     state = sESC
                 elif c == '\r':
-                    self.pttTerm.userEvent(UserEvent.Key_Enter)
+                    if not self.pttTerm.userEvent(UserEvent.Key_Enter): return False
                 elif b == IAC:
                     state = IAC
             elif state == sESC:
@@ -457,15 +464,15 @@ class SniffWebSocket:
             elif state == sCSI:
                 if 'A' <= c <= 'H':
                     if c == 'A':
-                        self.pttTerm.userEvent(UserEvent.Key_Up)
+                        if not self.pttTerm.userEvent(UserEvent.Key_Up): return False
                         if uncommitted: self.screen.cursor_up()
                     elif c == 'B':
-                        self.pttTerm.userEvent(UserEvent.Key_Down)
+                        if not self.pttTerm.userEvent(UserEvent.Key_Down): return False
                         if uncommitted: self.screen.cursor_down()
                     elif c == 'C':
-                        self.pttTerm.userEvent(UserEvent.Key_Right)
+                        if not self.pttTerm.userEvent(UserEvent.Key_Right): return False
                     elif c == 'D':
-                        self.pttTerm.userEvent(UserEvent.Key_Left)
+                        if not self.pttTerm.userEvent(UserEvent.Key_Left): return False
                     else:
                         print("xterm key:", self.xterm_keys[b - ord('A')])
                 elif '0' <= c <= '9':
@@ -507,6 +514,7 @@ class SniffWebSocket:
                 else:
                     break
             n += 1
+        return True
 
     async def server_msg_timeout(self, flow, event):
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
@@ -590,7 +598,9 @@ class SniffWebSocket:
 
         flow_msg = flow.websocket.messages[-1]
         if flow_msg.from_client:
-            self.client_message(flow_msg.content)
+            if not self.client_message(flow_msg.content):
+                print("Drop client message!")
+                flow_msg.drop()
         else:
             self.server_message(flow_msg.content)
 

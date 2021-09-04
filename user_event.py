@@ -5,7 +5,9 @@ class UserEvent:
     Key_Right = 3
     Key_Left = 4
     Key_Enter = 5
+
     # 32 ~ 126 is the same viewable ASCII code
+    Key_Space = ord(' ')
 
     @staticmethod
     def isViewable(event: int):
