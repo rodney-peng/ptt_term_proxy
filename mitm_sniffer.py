@@ -29,18 +29,24 @@ class myDumpMaster(DumpMaster):
         super().__init__(options, with_termlog, with_dumper)
         self._watchdog_time = -1
 
+    def shutdown(self):
+        print("master shutdown!")
+        if hasattr(self, "conn_task") and not self.conn_task.done():
+            self.conn_task.cancel()
+        super().shutdown()
+
     def on_SIGUSR1(self):
         print("master got SIGUSR1", self._watchdog_time)
         if self.sniffers:
             for addon in self.sniffers:
-                if hasattr(addon, "on_SIGUSR1"):
+                if hasattr(addon, "on_SIGUSR1") and callable(addon.on_SIGUSR1):
                     addon.on_SIGUSR1()
 
     def on_SIGUSR2(self):
         print("master got SIGUSR2", self._watchdog_time)
         if self.sniffers:
             for addon in self.sniffers:
-                if hasattr(addon, "on_SIGUSR2"):
+                if hasattr(addon, "on_SIGUSR2") and callable(addon.on_SIGUSR2):
                     addon.on_SIGUSR2()
 
     def add_sniffer(self, *sniffers):
@@ -89,7 +95,7 @@ class myDumpMaster(DumpMaster):
         print("reload_watcher finished!")
 
     def start_watcher(self):
-        asyncio.ensure_future(self.conn_watcher())
+        self.conn_task = asyncio.ensure_future(self.conn_watcher())
 
 # TODO: can reload the sniffer addon on SIGUSR2
 #        self.reload_event = asyncio.Event()
@@ -144,8 +150,8 @@ try:
     try:
         loop.add_signal_handler(signal.SIGINT, getattr(master, "prompt_for_exit", master.shutdown))
         loop.add_signal_handler(signal.SIGTERM, master.shutdown)
-        loop.add_signal_handler(signal.SIGUSR1, master.on_SIGUSR1)
-        loop.add_signal_handler(signal.SIGUSR2, master.on_SIGUSR2)
+#        loop.add_signal_handler(signal.SIGUSR1, master.on_SIGUSR1)
+#        loop.add_signal_handler(signal.SIGUSR2, master.on_SIGUSR2)
     except NotImplementedError:
         # Not supported on Windows
         pass
@@ -162,6 +168,6 @@ try:
 except exceptions.OptionsError as e:
     print("{}: {}".format(sys.argv[0], e), file=sys.stderr)
     sys.exit(1)
-except (KeyboardInterrupt, RuntimeError):
-    pass
+except KeyboardInterrupt:
+    print("KeyboardInterrupt in main!")
 

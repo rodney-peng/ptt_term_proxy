@@ -3,6 +3,7 @@ import signal
 import socket
 import pickle
 import shelve
+import traceback
 
 from ptt_thread import PttThread, PttThreadPersist
 
@@ -50,8 +51,8 @@ class PttPersist:
         try:
             self.socket.sendall(_type.to_bytes(4, 'big') + size.to_bytes(4, 'big'))
             self.socket.sendall(data)
-        except Exception as e:
-            print("failed to send:", e)
+        except Exception:
+            traceback.print_exc()
             self.close()
 
     # server methods
@@ -114,9 +115,8 @@ class PttPersist:
         for board, threads in _updates.items():
             try:
                 os.makedirs(os.path.join(cls.archive_dir, board), mode=0o775, exist_ok=True)
-            except Exception as e:
-                print("Failed to create directory for board", board)
-                print(e)
+            except Exception:
+                traceback.print_exc()
                 continue
             for aidc, thread in threads.items():
                 print(board, aidc, thread)
@@ -166,9 +166,8 @@ class PttPersist:
                     conn.close()
                 except KeyboardInterrupt:
                     break
-#                except Exception as e:
-#                    print(e)
-#                    break
+                except Exception:
+                    traceback.print_exc()
 
         cls.saveUpdates(_updates)
         _shelve.close()     # call __getstate__() for all threads in the shelve

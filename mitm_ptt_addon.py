@@ -4,6 +4,8 @@ import re
 import pyte
 import asyncio
 import time
+import socket
+import traceback
 
 from mitmproxy import http, ctx
 
@@ -295,8 +297,8 @@ class PttTerm:
             if self.flow:
                 try:
                     self.flow.sendToServer(prio_data if prio_data else macro['data'])
-                except Exception as e:
-                    print("sendToServer exception:\n", e)
+                except Exception:
+                    traceback.print_exc()
                     break
             else:
                 print("ProxyFlow is unavailable!")
@@ -317,15 +319,14 @@ class PttTerm:
                 print("macro event cancelled!")
                 break
             except Exception as e:
-                print("wait_for exception:\n", e)
-                break
+                traceback.print_exc()
 
             if event.is_set():
                 event.clear()
                 try:
                     next = self.handle_macro_event(macro, timeout, prio_data is not None)
                 except Exception as e:
-                    print("handle_macro_event:\n", e)
+                    traceback.print_exc()
                     break
                 if next is True:
                     prio_data = None
@@ -347,6 +348,8 @@ class PttTerm:
         print("run_macro task finished!")
 
 class SniffWebSocket:
+
+    sock_filename = os.path.join(os.path.normpath("/"), "tmp", ".ptt_sniffer")
 
     def __init__(self):
         self.reset()
@@ -516,6 +519,35 @@ class SniffWebSocket:
             n += 1
         return True
 
+    async def handle_sock(self, reader, writer):
+        while True:
+            data = await reader.readline()
+            if not data: break
+            data = data.decode().rstrip('\n')
+            print("\ncommand:", data)
+            try:
+                if data.startswith('.'):
+                    exec("self.pttTerm" + data)
+                elif data.startswith('?'):
+                    exec(f"print(self.pttTerm.{data[1:]})")
+                elif data.startswith('!'):
+                    exec(data[1:])
+                else:
+                    exec(f"print({data})")
+            except Exception:
+                traceback.print_exc()
+
+    async def sock_server_task(self):
+        try:
+            self.sock_server = await asyncio.start_unix_server(self.handle_sock, self.sock_filename)
+            await self.sock_server.serve_forever()
+        except asyncio.CancelledError:
+            print("sock_server_task cancelled!")
+        except Exception:
+            traceback.print_exc()
+
+        print("sock_server_task finished")
+
     async def server_msg_timeout(self, flow, event):
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
         cancelled = False
@@ -524,8 +556,8 @@ class SniffWebSocket:
                 await event.wait()
             except asyncio.CancelledError:
                 cancelled = True
-            except Exception as e:
-                print("server_msg_timeout wait exception\n", e)
+            except Exception:
+                traceback.print_exc()
 
             rcv_len = len(self.server_msgs)
             while not cancelled:
@@ -534,7 +566,7 @@ class SniffWebSocket:
                 except asyncio.CancelledError:
                     cancalled = True
                 except Exception as e:
-                    print("server_msg_timeout sleep exception\n", e)
+                    traceback.print_exc()
 
                 if len(self.server_msgs) <= rcv_len:
                     break
@@ -567,13 +599,16 @@ class SniffWebSocket:
         self.is_running = True
         print("log_verbosity:", self.log_verbosity)
         print("flow_detail:", self.flow_detail)
+        self.sock_task = asyncio.create_task(self.sock_server_task())
 
     def done(self):
         print("SniffWebSocket done!")
         if hasattr(self, "server_task") and not self.server_task.done():
             self.server_task.cancel()
-            while not self.server_task.done():
-                time.sleep(0.1)
+        if hasattr(self, "sock_server"):
+            self.sock_server.close()
+        if hasattr(self, "sock_task") and not self.sock_task.done():
+            self.sock_task.cancel()
 
     # Websocket lifecycle
 
