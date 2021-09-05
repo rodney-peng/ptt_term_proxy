@@ -1,9 +1,11 @@
+import sys
 import os
 import signal
 import socket
 import pickle
 import shelve
 import traceback
+import asyncio
 
 from ptt_thread import PttThread, PttThreadPersist
 
@@ -40,7 +42,7 @@ class PttPersist:
             self.socket.close()
             self.socket = None
 
-    def send(self, obj, _type):
+    def send(self, _type, obj):
         if not self.socket:
             print("Not connected!")
             return
@@ -49,7 +51,7 @@ class PttPersist:
         size = len(data)
 
         try:
-            self.socket.sendall(_type.to_bytes(4, 'big') + size.to_bytes(4, 'big'))
+            self.socket.sendall(_type.to_bytes(1, 'big') + size.to_bytes(4, 'big'))
             self.socket.sendall(data)
         except Exception:
             traceback.print_exc()
@@ -122,55 +124,109 @@ class PttPersist:
                 print(board, aidc, thread)
                 thread.saveContent(os.path.join(cls.archive_dir, board, aidc))
 
+    cmd_formats = {'.':  "cls.{data}",
+                   '?':  "print(cls.{data})",
+                   '!':  "{data}",
+                   '\\': "print({data})" }
+
+    '''
+        Tips for debugging:
+        1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
+        2. then run "vars(self)" or "vars(cls)" to see what attributes are available
+        3. enter the leading character to repeat the last command
+    '''
     @classmethod
-    def server(cls):
-        _sock = None
-        _shelve = cls.init_shelve()
-        _updates = {}
+    async def client_task(cls, reader, writer):
+
+        class _file():
+            @staticmethod
+            def write(data: str):
+                writer.write(data.encode())
+
+            @staticmethod
+            def flush():
+                pass
+
+        _out = sys.stdout
+        _err = sys.stderr
+
+        last_cmds = {'.': None, '?': None, '!': None, '\\': None}
+        while True:
+            leading = await reader.read(1)
+            if not leading: break
+
+            _type = leading[0]
+
+            if _type == cls.TYPE_THREAD:
+                data = await reader.read(4)
+                if not data or len(data) != 4: break
+
+                size = int.from_bytes(data, byteorder='big')
+
+                data = await reader.read(size)
+                if not data or len(data) != size: break
+
+                obj = pickle.loads(data)    # call __setstate__()
+                cls.handle_thread(obj, cls.shelve, cls.updates)
+            elif _type != ord('\n'):
+                data = await reader.readline()
+                if not data: break
+
+                data = (leading + data).decode().rstrip('\n').strip()
+                if not data: continue
+                print("\ncommand:", data)
+
+                if data[0] not in cls.cmd_formats:
+                    data = '\\' + data
+                if len(data) > 1:
+                    cmd = cls.cmd_formats[data[0]].format(data=data[1:])
+                    last_cmds[data[0]] = cmd
+                else:
+                    cmd = last_cmds[data[0]]
+
+                if cmd:
+                    print("exec:", cmd)
+                    sys.stdout = _file
+                    sys.stderr = _file
+                    try:
+                        exec(cmd)
+                    except Exception:
+                        traceback.print_exc()
+                    finally:
+                        sys.stdout = _out
+                        sys.stderr = _err
+                    await writer.drain()
+
+        writer.close()
+
+    @classmethod
+    async def server(cls):
+        cls.shelve = cls.init_shelve()
+        cls.updates = {}
 
         def sigterm(signum, frame):
             print("Got signal", signum, frame)
-            if _sock: _sock.close()
+            raise asyncio.CancelledError
 
         signal.signal(signal.SIGTERM, sigterm)
 
-        def handle_conn(conn):
-            data = conn.recv(8)
-            if not data or len(data) != 8: return False
-
-            _type = int.from_bytes(data[:4], byteorder='big')
-            size  = int.from_bytes(data[4:], byteorder='big')
-
-            data = conn.recv(size)
-            if not data or len(data) != size: return False
-            obj = pickle.loads(data)    # call __setstate__()
-
-            if _type == cls.TYPE_THREAD:
-                cls.handle_thread(obj, _shelve, _updates)
-            return True
-
         try:
-            os.remove(cls.sock_filename)
-        except FileNotFoundError:
+            server = await asyncio.start_unix_server(cls.client_task, cls.sock_filename)
+            try:
+                await server.serve_forever()
+            except asyncio.CancelledError:
+                print("asyncio.CancelledError in server")
+            except Exception:
+                traceback.print_exc()
+            finally:
+                server.close()
+        except asyncio.CancelledError:
             pass
+        except Exception:
+            traceback.print_exc()
 
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            _sock = s
-            s.bind(cls.sock_filename)
-            s.listen(1)
-            while True:
-                try:
-                    conn, _ = s.accept()
-                    while handle_conn(conn):
-                        pass
-                    conn.close()
-                except KeyboardInterrupt:
-                    break
-                except Exception:
-                    traceback.print_exc()
-
-        cls.saveUpdates(_updates)
-        _shelve.close()     # call __getstate__() for all threads in the shelve
+        cls.saveUpdates(cls.updates)
+        cls.shelve.close()     # call __getstate__() for all threads in the shelve
         print("Server ends!")
 
     @classmethod
@@ -192,5 +248,10 @@ class PttPersist:
 
 
 if __name__ == "__main__":
-    PttPersist.server()
+    try:
+        asyncio.run(PttPersist.server())
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt in main")
+    except asyncio.CancelledError:
+        print("asyncio.CancelledError in main")
 

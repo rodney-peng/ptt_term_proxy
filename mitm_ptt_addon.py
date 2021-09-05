@@ -141,7 +141,7 @@ class PttTerm:
         if not self.persistor.is_connected():
             self.persistor.connect()
         if self.persistor.is_connected():
-            self.persistor.send(thread, PttPersist.TYPE_THREAD)
+            self.persistor.send(PttPersist.TYPE_THREAD, thread)
 
     def pre_refresh(self):
         if self.state == self._State.InBoard and self.event in [UserEvent.Key_Right, UserEvent.Key_Enter]:
@@ -519,27 +519,68 @@ class SniffWebSocket:
             n += 1
         return True
 
-    async def handle_sock(self, reader, writer):
+    cmd_formats = {'.':  "self.pttTerm.{data}",
+                   '?':  "print(self.pttTerm.{data})",
+                   '!':  "{data}",
+                   '\\': "print({data})" }
+
+    '''
+        Tips for debugging:
+        1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
+        2. then run "vars(self)" or "vars(cls)" to see what attributes are available
+        3. enter the leading character to repeat the last command
+    '''
+    async def sock_client_task(self, reader, writer):
+
+        class _file():
+            @staticmethod
+            def write(data: str):
+                writer.write(data.encode())
+
+            @staticmethod
+            def flush():
+                pass
+
+        _out = sys.stdout
+        _err = sys.stderr
+
+        last_cmds = {'.': None, '?': None, '!': None, '\\': None}
         while True:
+            writer.write("> ".encode())
+            await writer.drain()
+
             data = await reader.readline()
             if not data: break
-            data = data.decode().rstrip('\n')
+
+            data = data.decode().rstrip('\n').strip()
+            if not data: continue
             print("\ncommand:", data)
-            try:
-                if data.startswith('.'):
-                    exec("self.pttTerm" + data)
-                elif data.startswith('?'):
-                    exec(f"print(self.pttTerm.{data[1:]})")
-                elif data.startswith('!'):
-                    exec(data[1:])
-                else:
-                    exec(f"print({data})")
-            except Exception:
-                traceback.print_exc()
+
+            if data[0] not in self.cmd_formats:
+                data = '\\' + data
+            if len(data) > 1:
+                cmd = self.cmd_formats[data[0]].format(data=data[1:])
+                last_cmds[data[0]] = cmd
+            else:
+                cmd = last_cmds[data[0]]
+
+            if cmd:
+                print("exec:", cmd)
+                sys.stdout = _file
+                sys.stderr = _file
+                try:
+                    exec(cmd)
+                except Exception:
+                    traceback.print_exc()
+                finally:
+                    sys.stdout = _out
+                    sys.stderr = _err
+                await writer.drain()
+        writer.close()
 
     async def sock_server_task(self):
         try:
-            self.sock_server = await asyncio.start_unix_server(self.handle_sock, self.sock_filename)
+            self.sock_server = await asyncio.start_unix_server(self.sock_client_task, self.sock_filename)
             await self.sock_server.serve_forever()
         except asyncio.CancelledError:
             print("sock_server_task cancelled!")
