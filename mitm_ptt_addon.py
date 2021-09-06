@@ -133,7 +133,7 @@ class PttTerm:
             while not self.macro_task.done():
                 time.sleep(0.1)
 
-        self.thread.enablePersistence(False)
+        self.thread.setPersistentState(False)
         self.macro_event = asyncio.Event()
         self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event))
 
@@ -155,9 +155,14 @@ class PttTerm:
 
         if newState in [self._State.Waiting, self._State.Unknown]:
             # TODO: screen already changed but state remains
+            if self.state == self._State.InThread:
+                self.thread.setWaitingState(True)
             if hasattr(self, "macro_task") and not self.macro_task.done():
                 self.macro_event.set()
             return
+        else:
+            if self.state == self._State.InThread:
+                self.thread.setWaitingState(False)
 
         prevState = self.state
         self.state = newState
@@ -343,7 +348,7 @@ class PttTerm:
             i += 1
 
         if macros is self.macros_pmore_config:
-            self.thread.enablePersistence(True)
+            self.thread.setPersistentState(True)
 
         print("run_macro task finished!")
 
@@ -528,7 +533,39 @@ class SniffWebSocket:
         Tips for debugging:
         1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
         2. then run "vars(self)" or "vars(cls)" to see what attributes are available
-        3. enter the leading character to repeat the last command
+        3. enter the leading character to repeat the last command: '.', '?', '!', backslash
+        4. runtime binding, e.g. to debug a class method "a_method" in "module.py":
+
+           a_func(...):                 # ordinary function
+           a_bound_func(bound, ...):    # ordinary function takes at least one argument
+           class C:
+                a_method(self):
+                @classmethod
+                a_class_method(cls):
+                @staticmethod
+                a_static_method():
+
+           1. modify the code and bind self.a_method:
+
+            "!import types, module"
+            "!self.a_method = types.MethodType(module.a_bound_func, self)     # bound will be an instance
+            "!self.__class__.a_method = module.a_bound_func                   # bound will be an instance
+            "!self.__class__.a_method = module.C.a_method
+            "!self.__class__.a_class_method = classmethod(module.a_bound_func)     # bound will be an class
+            "!self.__class__.a_static_method = staticmethod(module.a_func)
+
+            !!! Don't run "!self.a_method = module.C.a_method" !!!
+
+           Please note that the visibility of self.a_method is now in the modified "module.py".
+
+           2. continue to modify, reload and rebinds:
+
+            "!from importlib import reload"
+            "!reload(module)"
+
+           3. rebind a global function:
+
+            "!global a_func; a_func = module.a_func"
     '''
     async def sock_client_task(self, reader, writer):
 

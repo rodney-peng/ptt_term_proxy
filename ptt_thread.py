@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import traceback
 
 from uao import register_uao
 register_uao()
@@ -21,9 +22,25 @@ class PttThread:
         self.lines = []
         self.lastLine = 0
         self.url = None
-        self.atBegin = self.atEnd = False
         self.firstViewed = self.lastViewed = 0
         self.elapsedTime = 0
+
+        self.atBegin = self.atEnd = False
+        self.persistent = True
+        self.waitingForInput = False
+
+    # remove properties which don't need to persist, only needed for PttThreadPersist
+    # It is here for symmetrical purpose.
+    # When properties are changed in clear(), don't forget to change here as well.
+    @staticmethod
+    def removeForPersistence(state):
+        # only self.lines is initiated in PttThreadPersist.__setstate__()
+        del state['lines']
+        if 'atBegin' in state: del state['atBegin']
+        if 'atEnd'   in state: del state['atEnd']
+        if 'persistent'      in state: del state['persistent']
+        if 'waitingForInput' in state: del state['waitingForInput']
+        return state
 
     def loadContent(self, filename):
         try:
@@ -45,7 +62,7 @@ class PttThread:
                     f.write((line if line != self.LINE_HOLDER else '') + '\n')
                 print("Write", filename, "bytes", f.tell())
         except Exception as e:
-            print(f"Failed to save {filename}:\n", e)
+            traceback.print_exc()
 
     def view(self, lines, first: int, last: int, atEnd: bool):
         assert 0 < first <= last
@@ -146,13 +163,17 @@ class PttThread:
             print(self.text(-3))
         print()
 
-    # don't switch thread by Up/Down at first/last line
+    # don't switch thread by Up at first line, or Down/Enter/Space at last line
     def is_prohibited(self, event: UserEvent):
-        return (event == UserEvent.Key_Up and self.atBegin) or \
-               (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd)
+        return False if self.waitingForInput else ( \
+               (event == UserEvent.Key_Up and self.atBegin) or \
+               (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd) )
 
-    def enablePersistence(self, enabled=True):
-        self.persistence = enabled
+    def setPersistentState(self, enabled: bool):
+        self.persistent = enabled
+
+    def setWaitingState(self, enabled: bool):
+        self.waitingForInput = enabled
 
     def switch(self, pickler):
         if self.lastLine == 0: return False
@@ -162,8 +183,7 @@ class PttThread:
         elapsed = self.lastViewed - self.firstViewed
         if elapsed > 0: self.elapsedTime = elapsed
 
-        if not hasattr(self, "persistence") or self.persistence:
-            pickler(self)
+        if self.persistent: pickler(self)
 
         self.clear()
         return True
@@ -172,6 +192,7 @@ class PttThread:
         return (event is not None) and \
                (not self.is_prohibited(event)) and ( \
                (event == UserEvent.Key_Left) or \
+               (event == UserEvent.Key_Right and self.atEnd) or \
                (chr(event) in "qfb]+[-=tAa") )
 
     def mergedLines(self, lines, newline=False):
@@ -263,13 +284,13 @@ class PttThread:
 class PttThreadPersist(PttThread):
 
     # https://docs.python.org/3/library/pickle.html#handling-stateful-objects
-    # called upon pickling
+    # called upon pickling (save to shelve)
     def __getstate__(self):
         state = self.__dict__.copy()
-        del state['lines']
-        return state
+        return self.removeForPersistence(state)
 
-    # called upon construction or unpickling
+    # called upon construction or unpickling (create new instance or load from shelve)
+    # Be cautious attributes removed from removeForPersistence() don't exist
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.lines = []

@@ -75,6 +75,7 @@ class PttPersist:
             for key, item in items.items():
                 print(category, key, item)
                 if isinstance(item, PttThread): item.show(False)
+        _shelve.cache = {}  # clear cache so that no data is updated
         _shelve.close()
 
     @classmethod
