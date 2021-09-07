@@ -1,6 +1,12 @@
 import sys
 import os
 
+'''
+    A customized mitmdump that has preconfigured options and can capture signals and watch connections.
+    Connection has a watchdog expires in 10 minutes (refer to CONNECTION_TIMEOUT in mitmproxy/proxy/server.py).
+    conn_watcher() will refresh the watchdog timer for each connection.
+'''
+
 if __name__ != "__main__":
     sys.exit(1)
 
@@ -8,15 +14,22 @@ import argparse
 import asyncio
 import signal
 import typing
-from time import sleep
+from dataclasses import dataclass
 
 from mitmproxy import options, optmanager, exceptions
 from mitmproxy.tools.main import process_options, run
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy.tools import cmdline
 from mitmproxy.utils import debug, arg_check
-#from mitmproxy.addons.proxyserver import Proxyserver
 from mitmproxy.proxy.server import TimeoutWatchdog
+from mitmproxy.hooks import Hook
+
+# handler = on_signal()
+@dataclass
+class OnSignalHook(Hook):
+    signum: int
+
+ptt_proxy = "ptt_proxy.py"
 
 class myDumpMaster(DumpMaster):
 
@@ -35,23 +48,15 @@ class myDumpMaster(DumpMaster):
             self.conn_task.cancel()
         super().shutdown()
 
-    def on_SIGUSR1(self):
+    def SIGUSR1(self):
         print("master got SIGUSR1", self._watchdog_time)
-        if self.sniffers:
-            for addon in self.sniffers:
-                if hasattr(addon, "on_SIGUSR1") and callable(addon.on_SIGUSR1):
-                    addon.on_SIGUSR1()
+        m = self.addons.get(ptt_proxy)
+        if m:
+            # m is a Python module
+            self.addons.invoke_addon(m, OnSignalHook(signal.SIGUSR1))
 
-    def on_SIGUSR2(self):
+    def SIGUSR2(self):
         print("master got SIGUSR2", self._watchdog_time)
-        if self.sniffers:
-            for addon in self.sniffers:
-                if hasattr(addon, "on_SIGUSR2") and callable(addon.on_SIGUSR2):
-                    addon.on_SIGUSR2()
-
-    def add_sniffer(self, *sniffers):
-        self.sniffers = sniffers
-        self.addons.add(*sniffers)
 
     async def conn_watcher(self):
         server = self.addons.get("proxyserver")
@@ -64,42 +69,14 @@ class myDumpMaster(DumpMaster):
                 break
 
             for conn in server._connections.values():
+                self._watchdog_time = conn.timeout_watchdog.last_activity
                 # kick watchdog by calling disarm()
                 with conn.timeout_watchdog.disarm():
                     pass
-                self._watchdog_time = conn.timeout_watchdog.last_activity
         print("conn_watcher finished!")
-
-    async def reload_watcher(self, event):
-#        from importlib import reload
-        print("Reload watcher started!")
-        while True:
-            try:
-                await event.wait()
-            except asyncio.CancelledError:
-                break
-            else:
-                print("clear reload event!")
-                event.clear()
-
-            print("Reload addon!")
-            if self.sniffers:
-                for addon in self.sniffers:
-                    self.addons.remove(addon)
-                del self.sniffers
-
-#            reload(SniffWebSocket)
-#            print(SniffWebSocket)
-            self.add_sniffer(*[SniffWebSocket()])
-
-        print("reload_watcher finished!")
 
     def start_watcher(self):
         self.conn_task = asyncio.ensure_future(self.conn_watcher())
-
-# TODO: can reload the sniffer addon on SIGUSR2
-#        self.reload_event = asyncio.Event()
-#        asyncio.ensure_future(self.reload_watcher(self.reload_event))
 
 print("PID", os.getpid())
 
@@ -110,11 +87,11 @@ debug.register_info_dumpers()
 
 opts = options.Options(listen_host="127.0.0.1", listen_port=8888)
 master = myDumpMaster(opts)
-
-from mitm_ptt_addon import addons as ptt_sniffers
-master.add_sniffer(*ptt_sniffers)
-
 master.start_watcher()
+
+# option "scripts" is only available once the default addons are loaded
+master.options.update(scripts=[ptt_proxy])
+#print(master.addons.lookup)
 
 parser = cmdline.mitmdump(opts)
 
@@ -150,8 +127,8 @@ try:
     try:
         loop.add_signal_handler(signal.SIGINT, getattr(master, "prompt_for_exit", master.shutdown))
         loop.add_signal_handler(signal.SIGTERM, master.shutdown)
-#        loop.add_signal_handler(signal.SIGUSR1, master.on_SIGUSR1)
-#        loop.add_signal_handler(signal.SIGUSR2, master.on_SIGUSR2)
+        loop.add_signal_handler(signal.SIGUSR1, master.SIGUSR1)
+        loop.add_signal_handler(signal.SIGUSR2, master.SIGUSR2)
     except NotImplementedError:
         # Not supported on Windows
         pass
