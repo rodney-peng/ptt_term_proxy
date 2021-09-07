@@ -130,9 +130,9 @@ class PttTerm:
 
     macros_pmore_config = [
 #        {'data': b' ', 'state': _State.Unknown},
-        {'data': b'\x1a', 'state': _State.InPanel}, # Ctrl-Z
-        {'data': b'b', 'state': [_State.InPanel, _State.InBoard]},   # will send to the board SYSOP if no board is viewed previously
-        {'data': b' ', 'state': _State.InBoard, 'timeout': True},    # skips the onboarding screen or allows timeout
+        {'data': b'\x1a', 'state': [_State.InPanel, _State.InBoard]},   # Ctrl-Z
+        {'data': b'b',    'state': [_State.InPanel, _State.InBoard]},   # will send to the board SYSOP if no board is viewed previously
+        {'data': b' ', 'state': _State.InBoard, 'timeout': True},       # skips the onboarding screen or allows timeout
         {'data': b'\r', 'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A', 'retry': 5},  # enters the thread at cursor or retry after cursor Up
         {'data': b'o', 'state': _State.InThread},   # enters thread browser config
         {'data': b'm', 'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
@@ -371,9 +371,12 @@ class PttTerm:
 pushedTerm = None
 
 def push(term):
+    global pushedTerm
     pushedTerm = term
+    pushedTerm.persistor.close()
 
 def pop(term):
+    global pushedTerm
     if pushedTerm:
         term.screen = pushedTerm.screen
         term.stream = pushedTerm.stream
@@ -381,6 +384,5 @@ def pop(term):
         term.read_flow = pushedTerm.read_flow
         term.post_refresh()
 
-        pushedTerm.persistor.close()
         pushedTerm = None
 

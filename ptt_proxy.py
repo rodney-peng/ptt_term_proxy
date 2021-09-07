@@ -17,14 +17,18 @@ class PttProxy:
 
     def __init__(self):
         self.reset()
+        self.is_done = False
 
     def reset(self):
         self.server_msgs = bytes()
-        if hasattr(self, "server_event") and self.server_event.is_set():
-            self.server_event.clear()
         if hasattr(self, "server_task") and not self.server_task.done():
             self.server_task.cancel()
-            del self.server_task
+        if hasattr(self, "server_event") and self.server_event.is_set():
+            self.server_event.clear()
+        if hasattr(self, "sock_server"):
+            self.sock_server.close()
+        if hasattr(self, "sock_task") and not self.sock_task.done():
+            self.sock_task.cancel()
 
     def purge_server_message(self):
         if len(self.server_msgs):
@@ -216,6 +220,7 @@ class PttProxy:
 
         last_cmds = {'.': None, '?': None, '!': None, '\\': None}
         while True:
+            if self.is_done: break
             writer.write("> ".encode())
             await writer.drain()
 
@@ -247,6 +252,7 @@ class PttProxy:
                     sys.stderr = _err
                 await writer.drain()
         writer.close()
+        print("sock_client_task finished")
 
     async def sock_server_task(self):
         print("sock_server_task started,", self.sock_task)
@@ -311,7 +317,7 @@ class PttProxy:
 
     def running(self):
         if hasattr(self, "is_running"): return
-        print(type(self).__qualname__, "running!")
+        print(self, "running!")
         self.is_running = True
         print("log_verbosity:", self.log_verbosity)
         print("flow_detail:", self.flow_detail)
@@ -319,14 +325,10 @@ class PttProxy:
         ptt_term.pop(pttTerm)
 
     def done(self):
-        print(type(self).__qualname__, "done!")
-        if hasattr(self, "server_task") and not self.server_task.done():
-            self.server_task.cancel()
-        if hasattr(self, "sock_server"):
-            self.sock_server.close()
-        if hasattr(self, "sock_task") and not self.sock_task.done():
-            self.sock_task.cancel()
+        print(self, "done!")
+        self.reset()
         ptt_term.push(pttTerm)
+        self.is_done = True
 
     def on_signal(self, signum):
         print("Addon got", signum, "(%d)" % int(signum))
@@ -339,11 +341,10 @@ class PttProxy:
 
     # Websocket lifecycle
 
+    # reloading the addon script will not run the hook websocket_start()
+    # so we cannot initiate self.server_event, self.server_task here
     def websocket_start(self, flow: http.HTTPFlow):
         print("websocket_start", flow)
-        self.server_event = asyncio.Event()
-        self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-        pttTerm.flowStarted(ptt_term.ProxyFlow(ctx.master, flow), self.read_flow)
 
     def websocket_end(self, flow: http.HTTPFlow):
         print("websocket_end")
@@ -357,6 +358,13 @@ class PttProxy:
             message is user-modifiable. Currently there are two types of
             messages, corresponding to the BINARY and TEXT frame types.
         """
+        if self.is_done: return
+
+        if not hasattr(self, "server_event"):
+            self.server_event = asyncio.Event()
+            self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
+            pttTerm.flowStarted(ptt_term.ProxyFlow(ctx.master, flow), self.read_flow)
+
         assert flow.websocket is not None
 
         flow_msg = flow.websocket.messages[-1]
