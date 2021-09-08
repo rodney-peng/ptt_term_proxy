@@ -47,20 +47,6 @@ def showCursor(screen):
     print("Cursor:", screen.cursor.y, screen.cursor.x, "'%s'" % screen.display[screen.cursor.y])
 
 
-class ProxyFlow:
-
-    def __init__(self, master, flow):
-        self.master = master
-        self.flow = flow
-
-    def sendToServer(self, data):
-        assert isinstance(data, bytes)
-        print("sendToServer:", data)
-        to_client = False
-        is_text = False
-        self.master.commands.call("inject.websocket", self.flow, to_client, data, is_text)
-
-
 class PttTerm:
 
     class _State:
@@ -109,9 +95,12 @@ class PttTerm:
     def feed(self, data: bytes):
         self.stream.feed(data.decode("big5uao", 'replace'))
 
-    def flowStarted(self, flow: ProxyFlow, from_file: bool):
-        self.flow = flow
+    def flowStarted(self, flow, from_file: bool):
+        self.flow = flow    # ptt_proxy.ProxyFlow
         self.read_flow = from_file
+
+        # if flow is read from file, don't persist
+        self.thread.setPersistentState(not from_file)
 
     def flowStopped(self):
         self.flow = None
@@ -241,10 +230,39 @@ class PttTerm:
                 except (AttributeError, IndexError):
                     print("Title missing: '%s'" % lines[1])
 
-            self.thread.view(self.screen.display[0:-1], firstLine, lastLine, percent == 100)
+            updateScreen, lastRow = self.thread.view(self.screen.display[0:-1], firstLine, lastLine, percent == 100)
+            if updateScreen: self.updateScreen(firstLine, lastLine, lastRow)
+
             return self._State.InThread
 
         return self._State.Unknown
+
+    def updateScreen(self, firstLine, lastLine, lastRow):
+        minColumns = 86
+        maxWidth = 5
+        if self.screen.columns < minColumns: return
+
+        def floorStr(floor):
+            if floor:
+                return "{:^{width}}".format(floor, width=maxWidth)
+            else:
+                return ' ' * maxWidth
+
+        data = b''
+        width = 0
+        for i in range(lastLine, firstLine-1, -1):
+            floor = self.thread.floor(i)
+            if floor is None: continue
+            row = lastRow - (lastLine - i)
+            col = minColumns + 1 - maxWidth
+            floor = floorStr(floor)
+            print(f"update [{row:2}, {col:2}] = '{floor}'")
+            data += (b'\x1b[%d;%dH' % (row, col)) + floor.encode()
+
+        # restore cursor position
+        data += (b'\x1b[%d;%dH' % (self.screen.cursor.y + 1, self.screen.cursor.x + 1))
+
+        self.flow.sendToClient(data)
 
     # the client message will be dropped if false is returned
     def userEvent(self, event: UserEvent):

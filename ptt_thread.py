@@ -13,6 +13,7 @@ class PttThread:
 
     def __init__(self, filename=None):
         self.clear()
+        self.persistent = True
 
         if filename and self.loadContent(filename):
             self.scanURL()
@@ -22,25 +23,37 @@ class PttThread:
         self.lines = []
         self.lastLine = 0
         self.url = None
-        self.firstViewed = self.lastViewed = 0
-        self.elapsedTime = 0
+        self.urlLine = 0
+
+        self.floors = []
+        self.lastFloorLine = 0
+
+        self.firstViewed = self.lastViewed = 0  # Epoch time
+        self.elapsedTime = 0  # in seconds
 
         self.atBegin = self.atEnd = False
-        self.persistent = True
         self.waitingForInput = False
 
-    # remove properties which don't need to persist, only needed for PttThreadPersist
-    # It is here for symmetrical purpose.
-    # When properties are changed in clear(), don't forget to change here as well.
+    # remove attributes which don't need to persist
+    # It's for PttThreadPersist only but is here for symmetrical purpose.
+    # When attributes are changed in clear(), change in removeForPickling() and initiateUnpickled() as well.
     @staticmethod
-    def removeForPersistence(state):
+    def removeForPickling(state):
         # only self.lines is initiated in PttThreadPersist.__setstate__()
         del state['lines']
+        if 'floors'  in state: del state['floors']
         if 'atBegin' in state: del state['atBegin']
         if 'atEnd'   in state: del state['atEnd']
         if 'persistent'      in state: del state['persistent']
         if 'waitingForInput' in state: del state['waitingForInput']
         return state
+
+    # initiate attributes removed by removeForPickling() but are needed by PttThreadPersist
+    def initiateUnpickled(self):
+        self.lines = []
+        self.floors = []
+        if not hasattr(self, "urlLine"): self.urlLine = 0
+        if not hasattr(self, "lastFloorLine"): self.lastFloorLine = 0
 
     def loadContent(self, filename):
         try:
@@ -78,30 +91,70 @@ class PttThread:
             #   [self.LINE_HOLDER for _ in range(last - self.lastLine)]
             #   self.LINE_HOLDER * (last - self.lastLine)
             self.lines.extend(self.LINE_HOLDER * (last - self.lastLine))
+            self.floors.extend([0] * (last - self.lastLine))
             self.lastLine = last
 
 #        print("View lines:", first, last, "curr:", len(self.lines), self.lastLine)
 
         i = 0
+        f = first
         text = ""
-        while i < len(lines) and first <= last:
+        while i < len(lines) and f <= last:
             line = lines[i].rstrip()
+            # it's assummed the minimum screen width is 80 and line-wrap occurrs only after 78 characters
             if len(line.encode("big5uao", "replace")) > 78 and line[-1] == '\\':
                 text += line[0:-1]
             else:
-                self.lines[first-1] = text + line
-#                print("add [%d]" % first, "'%s'" % self.lines[first-1])
+                self.lines[f-1] = text + line
+#                print("add [%d]" % f, "'%s'" % self.lines[f-1])
                 text = ""
-                first += 1
+                f += 1
             i += 1
 
-        if text and first <= last:
-            self.lines[first-1] = text
-#            print("add [%d]" % first, "'%s'" % self.lines[first-1])
-            first += 1
+        if text and f <= last:
+            self.lines[f-1] = text
+#            print("add [%d]" % f, "'%s'" % self.lines[f-1])
+            f += 1
 
-        if first <= last:
+        if f <= last:
             print("\nCaution: line wrap is probably missing!\n")
+
+        self.scanFloor(first, last)
+        updateScreen = 0 < self.urlLine < last
+        lastRow = i
+        return updateScreen, lastRow
+
+    def floor(self, line):
+        assert 1 <= line <= self.lastLine
+        # the value could be None(article), 0(reply) or positive int(floor)
+        return self.floors[line-1]
+
+    def scanFloor(self, first: int, last: int):
+#        re_floor_in_front = "(\ *?[0-9]+\ )?"
+        re_push_msg = "(推|噓|→) [0-9A-Za-z]+\ *:"
+        if not self.scanURL(): return False
+        if self.lastFloorLine:
+            floor = self.floors[self.lastFloorLine - 1]
+            line = self.lastFloorLine
+        else:
+            floor = 0
+            line = self.urlLine
+        while line < first-1:
+            if self.lines[line] == self.LINE_HOLDER: return False
+            if re.match(re_push_msg, self.lines[line]):
+                floor += 1
+                self.floors[line] = floor
+                self.lastFloorLine = line + 1
+                print("line:", line+1, "floor:", floor)
+            line += 1
+        while line <= last-1:
+            if self.lines[line] == self.LINE_HOLDER: return False
+            if re.match(re_push_msg, self.lines[line]):
+                floor += 1
+                self.floors[line] = floor
+                self.lastFloorLine = line + 1
+                print("(line):", line+1, "(floor):", floor)
+            line += 1
 
     def text(self, first = 1, last = -1):
 #        print("text:", first, last, self.lastLine)
@@ -112,7 +165,7 @@ class PttThread:
         text = ""
         while 0 < first <= last <= self.lastLine:
 #            print("line [%d]" % first, "'%s'" % self.lines[first-1])
-            text += (self.lines[first-1] + '\n')
+            text += ((self.lines[first-1] if self.lines[first-1] != self.LINE_HOLDER else '') + '\n')
             first += 1
         return text
 
@@ -128,6 +181,9 @@ class PttThread:
                self.lines[i+1].startswith("※ 發信站: 批踢踢實業坊") and \
                self.lines[i+2].startswith("※ 文章網址:"):
                 self.url = (self.lines[i+2])[7:].strip()
+                self.urlLine = (i+2)+1
+                # article lines has no floor
+                self.floors[0:self.urlLine] = [None] * self.urlLine
                 return self.url
             i -= 1
 
@@ -170,6 +226,7 @@ class PttThread:
                (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd) )
 
     def setPersistentState(self, enabled: bool):
+        print("setPersistentState", enabled)
         self.persistent = enabled
 
     def setWaitingState(self, enabled: bool):
@@ -287,13 +344,13 @@ class PttThreadPersist(PttThread):
     # called upon pickling (save to shelve)
     def __getstate__(self):
         state = self.__dict__.copy()
-        return self.removeForPersistence(state)
+        return self.removeForPickling(state)
 
     # called upon construction or unpickling (create new instance or load from shelve)
-    # Be cautious attributes removed from removeForPersistence() don't exist
+    # Be cautious attributes removed from removeForPickling() don't exist
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self.lines = []
+        self.initiateUnpickled()
 
     def view(self, lines, first: int, last: int, atEnd: bool):
         raise AssertionError("Viewing a persistent thread is invalid!")

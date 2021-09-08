@@ -11,6 +11,35 @@ import ptt_term
 
 pttTerm = ptt_term.PttTerm(128, 32)
 
+
+class ProxyFlow:
+
+    def __init__(self, master, flow, pttProxy):
+        self.master = master
+        self.flow = flow
+        self.proxy = pttProxy
+
+    def sendToServer(self, data):
+        assert isinstance(data, bytes)
+        print("sendToServer:", data)
+        to_client = False
+        is_text = False
+        self.master.commands.call("inject.websocket", self.flow, to_client, data, is_text)
+
+    def sendToClient(self, data):
+        assert isinstance(data, bytes)
+        print("sendToClient:", len(data))
+
+        if hasattr(self.proxy, "last_server_msg"):
+            print("Append to the last message")
+            self.proxy.last_server_msg.content += data
+        else:
+            print("Inject a new message")
+#            to_client = True
+#            is_text = False
+#            self.master.commands.call("inject.websocket", self.flow, to_client, data, is_text)
+
+
 class PttProxy:
 
     sock_filename = os.path.join(os.path.normpath("/"), "tmp", ".ptt_proxy")
@@ -42,7 +71,7 @@ class PttProxy:
         n = len(content)
         print("\nserver: (%d)" % n)
 
-        self.server_msgs = bytes().join([self.server_msgs, content])
+        self.server_msgs += content
 
         # dirty trick to identify the last segment with size
         # (FIXME) Done: handled in server_msg_timeout()
@@ -197,6 +226,7 @@ class PttProxy:
 
            2. continue to modify, reload and rebinds:
 
+            delete the module file from __pycache__
             "!from importlib import reload"
             "!reload(module)"
 
@@ -220,7 +250,7 @@ class PttProxy:
 
         last_cmds = {'.': None, '?': None, '!': None, '\\': None}
         while True:
-            if self.is_done: break
+            if self.is_done or self.sock_task.done(): break
             writer.write("> ".encode())
             await writer.drain()
 
@@ -363,7 +393,7 @@ class PttProxy:
         if not hasattr(self, "server_event"):
             self.server_event = asyncio.Event()
             self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-            pttTerm.flowStarted(ptt_term.ProxyFlow(ctx.master, flow), self.read_flow)
+            pttTerm.flowStarted(ProxyFlow(ctx.master, flow, self), self.read_flow)
 
         assert flow.websocket is not None
 
@@ -373,7 +403,9 @@ class PttProxy:
                 print("Drop client message!")
                 flow_msg.drop()
         else:
+            self.last_server_msg = flow_msg
             self.server_message(flow_msg.content)
+            del self.last_server_msg
 
     def websocket_handshake(self, flow: http.HTTPFlow):
         """
