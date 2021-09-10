@@ -76,9 +76,12 @@ class PttTerm:
         self.flow = None
         self.read_flow = False
         self.state = self._State.Unknown
-        self.event = UserEvent.Unknown
+
+        self.threadUpdated = None
         if hasattr(self, "thread"):
             self.thread.clear()
+
+        self._userEvent = UserEvent.Unknown
         if hasattr(self, "macro_task") and not self.macro_task.done():
             self.macro_task.cancel()
             del self.macro_task
@@ -96,7 +99,7 @@ class PttTerm:
         self.stream.feed(data.decode("big5uao", 'replace'))
 
     def flowStarted(self, flow, from_file: bool):
-        self.flow = flow    # ptt_proxy.ProxyFlow
+        self.flow = flow    # ptt_proxy.websocket_message.ProxyFlow
         self.read_flow = from_file
 
         # if flow is read from file, don't persist
@@ -118,29 +121,38 @@ class PttTerm:
             self.thread.show()
 
     macros_pmore_config = [
-#        {'data': b' ', 'state': _State.Unknown},
+        #{'data': b' ', 'state': _State.Unknown},  # if starts with onboarding screen once logged in
         {'data': b'\x1a', 'state': [_State.InPanel, _State.InBoard]},   # Ctrl-Z
-        {'data': b'b',    'state': [_State.InPanel, _State.InBoard]},   # will send to the board SYSOP if no board is viewed previously
-        {'data': b' ', 'state': _State.InBoard, 'timeout': True},       # skips the onboarding screen or allows timeout
-        {'data': b'\r', 'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A', 'retry': 5},  # enters the thread at cursor or retry after cursor Up
-        {'data': b'o', 'state': _State.InThread},   # enters thread browser config
-        {'data': b'm', 'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
-        {'data': b'l', 'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},   # 文章標頭分隔線: 無
-        {'data': b' ', 'state': _State.InThread},   # ends config
+        # will send to the board SYSOP if no board is viewed previously
+        {'data': b'b',    'state': [_State.InPanel, _State.InBoard]},
+        {'data': b' ',    'state': _State.InBoard, 'timeout': True},    # skips the onboarding screen or allows timeout
+        # enters the thread at cursor or retry after cursor Up
+        {'data': b'\r',   'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A\x1b[A', 'retry': 5},
+        {'data': b'o',    'state': _State.InThread},   # enters thread browser config
+        {'data': b'm',    'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
+        {'data': b'l',    'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},   # 文章標頭分隔線: 無
+        {'data': b' ',    'state': _State.InThread},    # ends config
         {'data': b'\x1b[D', 'state': _State.InBoard},   # Left and leaves the thread
-        {'data': b'\x1a', 'state': _State.InBoard},     # Ctrl-Z
-        {'data': b'c', 'state': _State.InPanel},        # goes to 分類看板
+        {'data': b'\x1a',   'state': _State.InBoard},   # Ctrl-Z
+        {'data': b'c',      'state': _State.InPanel},   # goes to 分類看板
         {'data': b'\x1b[D', 'state': _State.InPanel}    # Left and goes to 主功能表
         ]
     def runPmoreConfig(self):
+
+        def doneHook(macros):
+            print("runPmoreConfig done!")
+            self.thread.setPersistentState(True)
+
         if hasattr(self, "macro_task") and not self.macro_task.done():
             self.macro_task.cancel()
             while not self.macro_task.done():
                 time.sleep(0.1)
 
+        # disabling persistence depends on macro, so it's not disabled by default
         self.thread.setPersistentState(False)
+
         self.macro_event = asyncio.Event()
-        self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event))
+        self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event, doneHook))
 
     def persistThread(self, thread):
         if not self.persistor.is_connected():
@@ -148,13 +160,23 @@ class PttTerm:
         if self.persistor.is_connected():
             self.persistor.send(PttPersist.TYPE_THREAD, thread)
 
+    # before the first segment is sent to the client
+    def pre_update(self):
+        if self.state == self._State.InThread and self.threadUpdated and \
+           (self.thread.isUpdateEvent(self._userEvent) or self.thread.isSwitchEvent(self._userEvent)):
+            self.updateThread(*self.threadUpdated, True)
+            self.threadUpdated = None
+
+    # before the data is feed to the screen, some segments have already been sent to the client
     def pre_refresh(self):
-        if self.state == self._State.InBoard and self.event in [UserEvent.Key_Right, UserEvent.Key_Enter]:
+        if self.state == self._State.InBoard and \
+           self._userEvent in [UserEvent.Key_Right, UserEvent.Key_Enter]:
             showCursor(self.screen)     # entering a thread
 
-        if self.state == self._State.InThread and self.thread.isSwitchEvent(self.event):
+        if self.state == self._State.InThread and self.thread.isSwitchEvent(self._userEvent):
             self.thread.switch(self.persistThread)
 
+    # after the data is feed to the screen
     def post_refresh(self):
         newState = self._refresh()
 
@@ -174,6 +196,7 @@ class PttTerm:
 
         # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
+            self.threadUpdated = None
             self.thread.switch(self.persistThread)
 
         # if flow is read from file, don't run macro
@@ -230,20 +253,23 @@ class PttTerm:
                 except (AttributeError, IndexError):
                     print("Title missing: '%s'" % lines[1])
 
-            updateScreen, lastRow = self.thread.view(self.screen.display[0:-1], firstLine, lastLine, percent == 100)
-            if updateScreen: self.updateScreen(firstLine, lastLine, lastRow)
+            updateThread, lastRow = self.thread.view(self.screen.display[0:-1], firstLine, lastLine, percent == 100)
+            if updateThread:
+                self.threadUpdated = (firstLine, lastLine, lastRow)
+                self.updateThread(*self.threadUpdated)
+                # floor numbers will be cleared in pre_update()
 
             return self._State.InThread
 
         return self._State.Unknown
 
-    def updateScreen(self, firstLine, lastLine, lastRow):
+    def updateThread(self, firstLine, lastLine, lastRow, clear=False):
         minColumns = 86
         maxWidth = 5
         if self.screen.columns < minColumns: return
 
         def floorStr(floor):
-            if floor:
+            if floor and not clear:
                 return "{:^{width}}".format(floor, width=maxWidth)
             else:
                 return ' ' * maxWidth
@@ -252,28 +278,30 @@ class PttTerm:
         width = 0
         for i in range(lastLine, firstLine-1, -1):
             floor = self.thread.floor(i)
-            if floor is None: continue
+            if (floor is None) or (clear and floor == 0): continue
             row = lastRow - (lastLine - i)
             col = minColumns + 1 - maxWidth
             floor = floorStr(floor)
-            print(f"update [{row:2}, {col:2}] = '{floor}'")
+#            print(f"update [{row:2}, {col:2}] = '{floor}'")
             data += (b'\x1b[%d;%dH' % (row, col)) + floor.encode()
 
         # restore cursor position
         data += (b'\x1b[%d;%dH' % (self.screen.cursor.y + 1, self.screen.cursor.x + 1))
 
-        self.flow.sendToClient(data)
+        if clear:
+            self.flow.insertToClient(data)
+        else:
+            self.flow.sendToClient(data)
 
     # the client message will be dropped if false is returned
     def userEvent(self, event: UserEvent):
         print("User event:", UserEvent.name(event))
 
-        if event != UserEvent.Unknown and \
-           self.state == self._State.InThread and \
-           self.thread.is_prohibited(event):
-            return False
+        if event != UserEvent.Unknown and self.state == self._State.InThread:
+            if self.thread.is_prohibited(event):
+                return False
 
-        self.event = event
+        self._userEvent = event
         return True
 
     # return value:
@@ -325,7 +353,8 @@ class PttTerm:
         return None
 
     # macros is list of {data, expected states} pairs, see macros_pmore_config above
-    async def run_macro(self, macros, event):
+    async def run_macro(self, macros, event, doneHook=None):
+        print("run_macro task started!")
         self.macro_retry = -1
         prio_data = None
         i = 0
@@ -381,9 +410,7 @@ class PttTerm:
             prio_data = None
             i += 1
 
-        if macros is self.macros_pmore_config:
-            self.thread.setPersistentState(True)
-
+        if doneHook: doneHook(macros)
         print("run_macro task finished!")
 
 pushedTerm = None

@@ -6,38 +6,12 @@ import socket
 import traceback
 
 from mitmproxy import http, ctx
+from mitmproxy.proxy import layer, layers
+
 from user_event import UserEvent
 import ptt_term
 
 pttTerm = ptt_term.PttTerm(128, 32)
-
-
-class ProxyFlow:
-
-    def __init__(self, master, flow, pttProxy):
-        self.master = master
-        self.flow = flow
-        self.proxy = pttProxy
-
-    def sendToServer(self, data):
-        assert isinstance(data, bytes)
-        print("sendToServer:", data)
-        to_client = False
-        is_text = False
-        self.master.commands.call("inject.websocket", self.flow, to_client, data, is_text)
-
-    def sendToClient(self, data):
-        assert isinstance(data, bytes)
-        print("sendToClient:", len(data))
-
-        if hasattr(self.proxy, "last_server_msg"):
-            print("Append to the last message")
-            self.proxy.last_server_msg.content += data
-        else:
-            print("Inject a new message")
-#            to_client = True
-#            is_text = False
-#            self.master.commands.call("inject.websocket", self.flow, to_client, data, is_text)
 
 
 class PttProxy:
@@ -49,7 +23,8 @@ class PttProxy:
         self.is_done = False
 
     def reset(self):
-        self.server_msgs = bytes()
+        self.server_msgs = bytes()      # to be feed to the screen
+        self.standby_msgs = bytes()     # to be sent to the client
         if hasattr(self, "server_task") and not self.server_task.done():
             self.server_task.cancel()
         if hasattr(self, "server_event") and self.server_event.is_set():
@@ -59,28 +34,40 @@ class PttProxy:
         if hasattr(self, "sock_task") and not self.sock_task.done():
             self.sock_task.cancel()
 
-    def purge_server_message(self):
+    # feed to the screen
+    # event must be checked if not None
+    def purge_server_message(self, event: asyncio.Event):
+        event.clear()
+
         if len(self.server_msgs):
             pttTerm.pre_refresh()
             pttTerm.feed(self.server_msgs)
             pttTerm.post_refresh()
-
             self.server_msgs = bytes()
 
+        if len(self.standby_msgs): event.set()
+
+    # send to the client
+    def purge_standby_message(self, flow: http.HTTPFlow):
+        if len(self.standby_msgs):
+            ctx.master.sendToClient(flow, self.standby_msgs)
+            self.standby_msgs = bytes()
+
     def server_message(self, content):
+        self.server_msgs += content
+
+        if self.firstSegment: pttTerm.pre_update()
+
         n = len(content)
         print("\nserver: (%d)" % n)
-
-        self.server_msgs += content
 
         # dirty trick to identify the last segment with size
         # (FIXME) Done: handled in server_msg_timeout()
         # but sometimes a segment with size 1021 is not the last or the last segment is larger than 1021
         # (FIXME) Done: queue message segments in server_msgs
         # a double-byte character could be split into two segments
-        if n < 1021:
-            self.server_event.clear()
-            self.purge_server_message()
+        if self.lastSegment:
+            self.purge_server_message(self.server_event)
         else:
             self.server_event.set()
 
@@ -88,10 +75,6 @@ class PttProxy:
     xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
     def client_message(self, content):
         print("\nclient:", content)
-
-        if self.server_event.is_set():
-            self.server_event.clear()
-            self.purge_server_message()
 
         if len(content) == 1 and UserEvent.isViewable(content[0]):
             return pttTerm.userEvent(content[0])
@@ -126,6 +109,8 @@ class PttProxy:
             if state == None:
                 if c == sESC:
                     state = sESC
+                elif c == '\b':
+                    if not pttTerm.userEvent(UserEvent.Key_Backspace): return False
                 elif c == '\r':
                     if not pttTerm.userEvent(UserEvent.Key_Enter): return False
                 elif b == IAC:
@@ -147,6 +132,10 @@ class PttProxy:
                         if not pttTerm.userEvent(UserEvent.Key_Right): return False
                     elif c == 'D':
                         if not pttTerm.userEvent(UserEvent.Key_Left): return False
+                    elif c == 'F':
+                        if not pttTerm.userEvent(UserEvent.Key_End): return False
+                    elif c == 'H':
+                        if not pttTerm.userEvent(UserEvent.Key_Home): return False
                     else:
                         print("xterm key:", self.xterm_keys[b - ord('A')])
                 elif '0' <= c <= '9':
@@ -162,7 +151,15 @@ class PttProxy:
                     continue
                 elif c == '~':
                     number = int(number)
-                    if 1 <= number <= len(self.vt_keys):
+                    if number == 5:
+                        if not pttTerm.userEvent(UserEvent.Key_PgUp): return False
+                    elif number == 6:
+                        if not pttTerm.userEvent(UserEvent.Key_PgDn): return False
+                    elif number in [1, 7]:
+                        if not pttTerm.userEvent(UserEvent.Key_Home): return False
+                    elif number in [4, 8]:
+                        if not pttTerm.userEvent(UserEvent.Key_End): return False
+                    elif 1 <= number <= len(self.vt_keys):
                         print("vt key:", self.vt_keys[number-1])
                 state = None
             elif state == IAC:
@@ -235,6 +232,7 @@ class PttProxy:
             "!global a_func; a_func = module.a_func"
     '''
     async def sock_client_task(self, reader, writer):
+        from contextlib import redirect_stdout, redirect_stderr
 
         class _file():
             @staticmethod
@@ -271,15 +269,22 @@ class PttProxy:
 
             if cmd:
                 print("exec:", cmd)
-                sys.stdout = _file
-                sys.stderr = _file
+                with redirect_stdout(_file), redirect_stderr(_file):
+                    try:
+                        exec(cmd)
+                    except Exception:
+                        traceback.print_exc()
+                '''
                 try:
+                    sys.stdout = _file
+                    sys.stderr = _file
                     exec(cmd)
                 except Exception:
                     traceback.print_exc()
                 finally:
                     sys.stdout = _out
                     sys.stderr = _err
+                '''
                 await writer.drain()
         writer.close()
         print("sock_client_task finished")
@@ -297,35 +302,45 @@ class PttProxy:
 
         print("sock_server_task finished,", self.sock_task)
 
-    async def server_msg_timeout(self, flow, event):
+    async def server_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
         cancelled = False
         while (flow.websocket.timestamp_end is None) and not cancelled:
             try:
                 await event.wait()
             except asyncio.CancelledError:
-                cancelled = True
+                cancalled = True
+                break
             except Exception:
                 traceback.print_exc()
 
+            self.purge_standby_message(flow)
+
             rcv_len = len(self.server_msgs)
+            if rcv_len == 0:
+                event.clear()
+                continue
+
             while not cancelled:
                 try:
+                    # message could be purged during sleeping
                     await asyncio.sleep(0.1)
                 except asyncio.CancelledError:
                     cancalled = True
-                except Exception as e:
+                    break
+                except Exception:
                     traceback.print_exc()
 
+                # no more coming data
                 if len(self.server_msgs) <= rcv_len:
                     break
+
+            if cancelled: break
 
             if len(self.server_msgs):
                 print("Server event timeout! Pending:", len(self.server_msgs))
 
-            if event.is_set():
-                event.clear()
-                self.purge_server_message()
+            self.purge_server_message(event)
 
         print("server_msg_timeout() finished")
 
@@ -369,12 +384,24 @@ class PttProxy:
             print("server_task:", self.server_task)
         pttTerm.showState()
 
+    # next_layer() is called to determine the next layer and return in nextlayer.layer
+    def next_layer(self, nextlayer: layer.NextLayer):
+        _layers = nextlayer.context.layers
+        if len(_layers) and isinstance(_layers[-1], layers.HttpLayer):
+            self.httplayer = _layers[-1]
+            print("HttpLayer.streams:", _layers[-1].streams)
+            if len(_layers[-1].streams) == 1:
+                s = list(_layers[-1].streams.values())[0]
+                _layers = s.context.layers
+                if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
+                    print(_layers[-1])
+
     # Websocket lifecycle
 
     # reloading the addon script will not run the hook websocket_start()
     # so we cannot initiate self.server_event, self.server_task here
     def websocket_start(self, flow: http.HTTPFlow):
-        print("websocket_start", flow)
+        print("websocket_start")
 
     def websocket_end(self, flow: http.HTTPFlow):
         print("websocket_end")
@@ -388,24 +415,60 @@ class PttProxy:
             message is user-modifiable. Currently there are two types of
             messages, corresponding to the BINARY and TEXT frame types.
         """
+        class ProxyFlow:
+
+            @staticmethod
+            def sendToServer(data):
+                ctx.master.sendToServer(flow, data)
+
+            @staticmethod
+            def insertToClient(data):
+                if self.firstSegment:
+                    # insert ahead of the first segment
+                    self.current_message.content = data + self.current_message.content
+                else:
+                    self.standby_msgs += data
+
+            @staticmethod
+            def sendToClient(data):
+                if self.lastSegment:
+                    # piggyback to the last segment
+                    self.current_message.content += data
+                else:
+                    self.standby_msgs += data
+
         if self.is_done: return
 
         if not hasattr(self, "server_event"):
             self.server_event = asyncio.Event()
             self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-            pttTerm.flowStarted(ProxyFlow(ctx.master, flow, self), self.read_flow)
+            pttTerm.flowStarted(ProxyFlow, self.read_flow)
 
         assert flow.websocket is not None
 
         flow_msg = flow.websocket.messages[-1]
+        if ctx.master.is_self_injected(flow_msg): return
+
         if flow_msg.from_client:
+            self.firstSegment = False
+            self.lastSegment  = False
+
+            self.purge_standby_message(flow)
+            self.purge_server_message(self.server_event)
+
             if not self.client_message(flow_msg.content):
                 print("Drop client message!")
                 flow_msg.drop()
         else:
-            self.last_server_msg = flow_msg
+            self.firstSegment = not self.server_event.is_set() # (len(flow.websocket.messages) == 1 or flow.websocket.messages[-2].from_client)
+            self.lastSegment  = (len(flow_msg.content) < 1021) # see the comment in server_message() for why it's 1021
+            self.current_message = flow_msg
+
             self.server_message(flow_msg.content)
-            del self.last_server_msg
+
+            del self.current_message
+            self.firstSegment = False
+            self.lastSegment  = False
 
     def websocket_handshake(self, flow: http.HTTPFlow):
         """

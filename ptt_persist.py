@@ -28,7 +28,7 @@ class PttPersist:
         try:
             s.connect(self.sock_filename)
         except Exception as e:
-            print("failed to connect:", e)
+            print(f"failed to connect to {self.sock_filename}:", e)
             return None
         else:
             self.socket = s

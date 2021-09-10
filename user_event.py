@@ -5,6 +5,11 @@ class UserEvent:
     Key_Right = 3
     Key_Left = 4
     Key_Enter = 5
+    Key_PgUp = 6
+    Key_PgDn = 7
+    Key_Home = 8
+    Key_End = 9
+    Key_Backspace = 10
 
     # 32 ~ 126 is the same viewable ASCII code
     Key_Space = ord(' ')
@@ -16,6 +21,7 @@ class UserEvent:
     @classmethod
     def name(cls, event: int):
         assert event >= 0
-        return ["-", "Up", "Down", "Right", "Left", "Enter"][event] if event <= cls.Key_Enter else chr(event)
+        return ["-", "Up", "Down", "Right", "Left", "Enter", "PgUp", "PgDn",
+                "Home", "End", "BS"][event] if event <= cls.Key_Backspace else chr(event)
 
 

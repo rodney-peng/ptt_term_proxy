@@ -145,7 +145,7 @@ class PttThread:
                 floor += 1
                 self.floors[line] = floor
                 self.lastFloorLine = line + 1
-                print("line:", line+1, "floor:", floor)
+#                print("line:", line+1, "floor:", floor)
             line += 1
         while line <= last-1:
             if self.lines[line] == self.LINE_HOLDER: return False
@@ -153,7 +153,7 @@ class PttThread:
                 floor += 1
                 self.floors[line] = floor
                 self.lastFloorLine = line + 1
-                print("(line):", line+1, "(floor):", floor)
+#                print("(line):", line+1, "(floor):", floor)
             line += 1
 
     def text(self, first = 1, last = -1):
@@ -219,18 +219,34 @@ class PttThread:
             print(self.text(-3))
         print()
 
-    # don't switch thread by Up at first line, or Down/Enter/Space at last line
-    def is_prohibited(self, event: UserEvent):
-        return False if self.waitingForInput else ( \
-               (event == UserEvent.Key_Up and self.atBegin) or \
-               (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd) )
-
     def setPersistentState(self, enabled: bool):
         print("setPersistentState", enabled)
         self.persistent = enabled
 
     def setWaitingState(self, enabled: bool):
         self.waitingForInput = enabled
+
+    # don't switch thread by Up/BS at the first line, or Down/Enter/Space at the last line
+    def is_prohibited(self, event: UserEvent):
+        return False if self.waitingForInput else ( \
+               (event in [UserEvent.Key_Up, UserEvent.Key_Backspace] and self.atBegin) or \
+               (event in [UserEvent.Key_Down, UserEvent.Key_Enter, UserEvent.Key_Space] and self.atEnd) )
+
+    # update thread
+    def isUpdateEvent(self, event: UserEvent):
+        return (event is not None) and (not self.waitingForInput) and (not self.is_prohibited(event)) and ( \
+               (event in [UserEvent.Key_Up, UserEvent.Key_Down, UserEvent.Key_Right, UserEvent.Key_Enter,
+                          UserEvent.Key_Space, UserEvent.Key_Backspace,
+                          UserEvent.Key_PgUp, UserEvent.Key_PgDn, UserEvent.Key_Home, UserEvent.Key_End]) or \
+               (chr(event) in "$0Ggjk") )
+
+    # switch to board or another thread
+    def isSwitchEvent(self, event: UserEvent):
+        return (event is not None) and (not self.waitingForInput) and \
+               (not self.is_prohibited(event)) and ( \
+               (event == UserEvent.Key_Left) or \
+               (event == UserEvent.Key_Right and self.atEnd) or \
+               (chr(event) in "qfb]+[-=tAas") )
 
     def switch(self, pickler):
         if self.lastLine == 0: return False
@@ -244,13 +260,6 @@ class PttThread:
 
         self.clear()
         return True
-
-    def isSwitchEvent(self, event: UserEvent):
-        return (event is not None) and \
-               (not self.is_prohibited(event)) and ( \
-               (event == UserEvent.Key_Left) or \
-               (event == UserEvent.Key_Right and self.atEnd) or \
-               (chr(event) in "qfb]+[-=tAa") )
 
     def mergedLines(self, lines, newline=False):
         '''
