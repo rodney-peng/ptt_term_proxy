@@ -246,7 +246,7 @@ class PttThread:
                (not self.is_prohibited(event)) and ( \
                (event == UserEvent.Key_Left) or \
                (event == UserEvent.Key_Right and self.atEnd) or \
-               (chr(event) in "qfb]+[-=tAas") )
+               (chr(event) in "qfb]+[-=tAasQ") )
 
     def switch(self, pickler):
         if self.lastLine == 0: return False

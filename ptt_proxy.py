@@ -390,11 +390,14 @@ class PttProxy:
         if len(_layers) and isinstance(_layers[-1], layers.HttpLayer):
             self.httplayer = _layers[-1]
             print("HttpLayer.streams:", _layers[-1].streams)
+            '''
+            # probably don't have stream yet
             if len(_layers[-1].streams) == 1:
                 s = list(_layers[-1].streams.values())[0]
                 _layers = s.context.layers
                 if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
-                    print(_layers[-1])
+                    self.wslayer = _layers[-1]
+            '''
 
     # Websocket lifecycle
 
@@ -402,6 +405,18 @@ class PttProxy:
     # so we cannot initiate self.server_event, self.server_task here
     def websocket_start(self, flow: http.HTTPFlow):
         print("websocket_start")
+        wslayer = getattr(self, "wslayer", None)
+        httplayer = getattr(self, "httplayer", None)
+        if not wslayer and httplayer:
+            print("HttpLayer.streams:", httplayer.streams)
+            if len(httplayer.streams) == 1:
+                s = list(httplayer.streams.values())[0]
+                _layers = s.context.layers
+                if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
+                    self.wslayer = wslayer = _layers[-1]
+        if wslayer:
+            print(wslayer)
+            ctx.master.hijackWebsocketLayer(wslayer)
 
     def websocket_end(self, flow: http.HTTPFlow):
         print("websocket_end")

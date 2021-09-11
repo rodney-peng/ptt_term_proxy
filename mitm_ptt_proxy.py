@@ -141,8 +141,10 @@ class myDumpMaster(DumpMaster):
             return True
         return False
 
-    # cannot be called from within a websocket addon
-    def hijackWebsocketEvent(self, wslayer: WebsocketLayer = None):
+    # only applies to a WebsocketLayer in start state
+    def hijackWebsocketLayer(self, wslayer: WebsocketLayer):
+        '''
+        # unlikely to get in start state
         if wslayer is None:
             try:
                 conn = list(self.proxyserver._connections.values())[0]
@@ -151,53 +153,37 @@ class myDumpMaster(DumpMaster):
                 wslayer = s1.context.layers[-1]
             except Exception:
                 traceback.print_exc()
-
+        '''
         if isinstance(wslayer, WebsocketLayer):
             print(wslayer._handle_event)
-            if wslayer._handle_event == wslayer.relay_messages:
-                self.ws_layer = wslayer
-                self.ws_handle_event = wslayer._handle_event
-                self.ws_layer._handle_event = self.relay_messages
-                print("hijackWebsocketEvent!")
+            if wslayer._handle_event in [wslayer.__class__.start, wslayer.start]:
+                self.wsl_relay_messages = wslayer.relay_messages
+                wslayer.relay_messages = self.relay_websocket_messages
+                self.wslayer = wslayer
+                print("hijacked!", self.wslayer)
                 return True
         return False
-
-    def restoreWebsocketEvent(self):
-        if hasattr(self, "ws_layer") and self.ws_layer._handle_event == self.relay_messages:
-            self.ws_layer._handle_event = self.ws_handle_event
 
     from mitmproxy.proxy.utils import expect
 
     @expect(events.DataReceived, events.ConnectionClosed, WebSocketMessageInjected)
-    def relay_messages(self, event: events.Event) -> layer.CommandGenerator[None]:
+    def relay_websocket_messages(self, event: events.Event) -> layer.CommandGenerator[None]:
         try:
             if isinstance(event, events.DataReceived):
                 target = type(event.connection).__name__.lower()
-                print("ws data:", len(event.data), target)
+                print(f"ws data from {target}:", len(event.data))
             elif isinstance(event, WebSocketMessageInjected):
-                print("ws inject:", len(event.message.content), event.message.timestamp)
+                print("ws data to", "server:" if event.message.from_client else "client:", len(event.message.content), "@", event.message.timestamp)
             else:
                 print("ws event:", event)
         except Exception:
             traceback.print_exc()
 
-        yield from self.ws_handle_event(event)
+        yield from self.wsl_relay_messages(event)
 
     async def conn_watcher(self):
         from mitmproxy.proxy.server import TimeoutWatchdog
         print("conn_watcher starteded!", self.proxyserver)
-        '''
-        # Hijack Websocket event once connection is established, Ugly!!!
-        while True:
-            try:
-                await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                print("conn_watcher cancelled!")
-                return
-
-            if len(self.proxyserver._connections) and self.hijackWebsocketEvent():
-                break
-        '''
         while True:
             try:
                 await asyncio.sleep(TimeoutWatchdog.CONNECTION_TIMEOUT // 2)
