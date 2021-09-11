@@ -171,11 +171,12 @@ class myDumpMaster(DumpMaster):
         try:
             if isinstance(event, events.DataReceived):
                 target = type(event.connection).__name__.lower()
-                print(f"ws data from {target}:", len(event.data))
+                print(f"\nws data from {target}:", len(event.data))
             elif isinstance(event, WebSocketMessageInjected):
-                print("ws data to", "server:" if event.message.from_client else "client:", len(event.message.content), "@", event.message.timestamp)
+                target = "server" if event.message.from_client else "client"
+                print(f"\nws data to {target}:", len(event.message.content))
             else:
-                print("ws event:", event)
+                print("\nws event:", event)
         except Exception:
             traceback.print_exc()
 

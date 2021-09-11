@@ -49,12 +49,50 @@ def showCursor(screen):
 
 class PttTerm:
 
+    Unknown = 0
+    Waiting = 1
+    InPanel = 2
+    InBoard = 3
+    InThread = 4
+
+    # substates
+    waitingURL     = 1
+    waitingRefresh = 2
+
     class _State:
-        Unknown = 0
-        Waiting = 1
-        InPanel = 2
-        InBoard = 3
-        InThread = 4
+
+        def __init__(self, state = 0, substate = 0):
+            self.state = state
+            self.substate = substate
+
+        def __repr__(self):
+            return str(self.state) if self.substate == 0 else f"{self.state}.{self.substate}"
+
+        def __eq__(self, other):
+            if isinstance(other, self.__class__):
+                return self.state == other.state and \
+                       (self.substate == 0 or other.substate == 0 or self.substate == other.substate)
+            elif isinstance(other, int):
+                return self.state == other
+            else:
+                raise AssertionError(f"{other} is neither PttTerm._State nor integer.")
+
+        def __ne__(self, other):
+            return not self.__eq__(other)
+
+        def is_exact(self, *others):
+            for other in others:
+                if isinstance(other, self.__class__) and self.state == other.state and self.substate == other.substate:
+                    return True
+            return False
+
+    _State.Unknown = _State(Unknown)
+    _State.Waiting = _State(Waiting)
+    _State.InPanel = _State(InPanel)
+    _State.InBoard = _State(InBoard)
+    _State.InBoardWaitingURL     = _State(InBoard, waitingURL)
+    _State.InBoardWaitingRefresh = _State(InBoard, waitingRefresh)
+    _State.InThread = _State(InThread)
 
     persistor = PttPersist()
 
@@ -75,14 +113,16 @@ class PttTerm:
     def reset(self):
         self.flow = None
         self.read_flow = False
-        self.state = self._State.Unknown
+        self.state = self._State()
+        self.autoURL = True    # get URL/AIDC automatically when starts reading a thread
+        self.threadURL = None
 
         self.threadUpdated = None
         if hasattr(self, "thread"):
             self.thread.clear()
 
         self._userEvent = UserEvent.Unknown
-        if hasattr(self, "macro_task") and not self.macro_task.done():
+        if self.isMacroRunning():
             self.macro_task.cancel()
             del self.macro_task
 
@@ -120,18 +160,22 @@ class PttTerm:
         if self.state == self._State.InThread:
             self.thread.show()
 
+    def isMacroRunning(self):
+        return hasattr(self, "macro_task") and not self.macro_task.done()
+
     macros_pmore_config = [
         #{'data': b' ', 'state': _State.Unknown},  # if starts with onboarding screen once logged in
         {'data': b'\x1a', 'state': [_State.InPanel, _State.InBoard]},   # Ctrl-Z
         # will send to the board SYSOP if no board is viewed previously
         {'data': b'b',    'state': [_State.InPanel, _State.InBoard]},
         {'data': b' ',    'state': _State.InBoard, 'timeout': True},    # skips the onboarding screen or allows timeout
-        # enters the thread at cursor or retry after cursor Up
-        {'data': b'\r',   'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A\x1b[A', 'retry': 5},
-        {'data': b'o',    'state': _State.InThread},   # enters thread browser config
-        {'data': b'm',    'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
-        {'data': b'l',    'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},   # 文章標頭分隔線: 無
-        {'data': b' ',    'state': _State.InThread},    # ends config
+        # reads the thread at cursor or retry after cursor Up
+        # b'r' will not trigger autoURL in contrary to Enter(b'\r') and Right(b'\x1b[C')
+        {'data': b'r',   'state': [_State.InBoard, _State.InThread], 'timeout': b'\x1b[A\x1b[A\x1b[A', 'retry': 5},
+        {'data': b'o',   'state': _State.InThread},   # enters thread browser config
+        {'data': b'm',   'state': _State.InThread, 'row': -5, 'pattern': '\*顯示', 'retry': 3}, # 斷行符號: 顯示
+        {'data': b'l',   'state': _State.InThread, 'row': -4, 'pattern': '\*無', 'retry': 3},   # 文章標頭分隔線: 無
+        {'data': b' ',   'state': _State.InThread},    # ends config
         {'data': b'\x1b[D', 'state': _State.InBoard},   # Left and leaves the thread
         {'data': b'\x1a',   'state': _State.InBoard},   # Ctrl-Z
         {'data': b'c',      'state': _State.InPanel},   # goes to 分類看板
@@ -142,14 +186,16 @@ class PttTerm:
         def doneHook(macros):
             print("runPmoreConfig done!")
             self.thread.setPersistentState(True)
+            self.autoURL = True
 
-        if hasattr(self, "macro_task") and not self.macro_task.done():
+        if self.isMacroRunning():
             self.macro_task.cancel()
             while not self.macro_task.done():
                 time.sleep(0.1)
 
         # disabling persistence depends on macro, so it's not disabled by default
         self.thread.setPersistentState(False)
+        self.autoURL = False
 
         self.macro_event = asyncio.Event()
         self.macro_task = asyncio.create_task(self.run_macro(self.macros_pmore_config, self.macro_event, doneHook))
@@ -176,16 +222,42 @@ class PttTerm:
         if self.state == self._State.InThread and self.thread.isSwitchEvent(self._userEvent):
             self.thread.switch(self.persistThread)
 
+    def scanURL(self):
+        lines = self.screen.display
+        for i in range(2, self.screen.lines - 4):   # the box spans 4 lines
+            if lines[i  ].startswith("│ 文章代碼(AID):") and \
+               lines[i+1].startswith("│ 文章網址:"):
+
+                url = (lines[i+1])[7:].strip(" │")
+                print("URL found:", i+1, url)
+                board_fn = PttThread.url2fn(url)
+
+                _aid = re.match("\ *?#([0-9A-Za-z-_]{8})", (lines[i])[12:])
+                if _aid: aidc = _aid.group(1)
+
+                if board_fn and _aid and aidc == PttThread.fn2aidc(board_fn[1]):
+                    print("AIDS found:", board_fn[0], aidc)
+                    return url
+                    break
+        return None
+
+
     # after the data is feed to the screen
     def post_refresh(self):
         newState = self._refresh()
 
         if newState in [self._State.Waiting, self._State.Unknown]:
-            # TODO: screen already changed but state remains
-            if self.state == self._State.InThread:
+            if self.state.is_exact(self._State.InBoardWaitingURL):
+                self.threadURL = self.scanURL()
+                if newState == self._State.Waiting:
+                    self.flow.sendToServer(b' ')    # escape from waiting
+                    self.state = self._State.InBoardWaitingRefresh
+                else:
+                    self.state = self._State.InBoard
+            elif self.state == self._State.InThread:
                 self.thread.setWaitingState(True)
-            if hasattr(self, "macro_task") and not self.macro_task.done():
-                self.macro_event.set()
+
+            if self.isMacroRunning(): self.macro_event.set()
             return
         else:
             if self.state == self._State.InThread:
@@ -194,8 +266,14 @@ class PttTerm:
         prevState = self.state
         self.state = newState
 
+        if prevState.is_exact(self._State.InBoardWaitingURL, self._State.InBoardWaitingRefresh) and \
+           newState.is_exact(self._State.InBoard):
+            if self.threadURL:
+                self.flow.sendToServer(b'r')   # to enter the thread
+
         # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
+            self.threadURL = None
             self.threadUpdated = None
             self.thread.switch(self.persistThread)
 
@@ -203,14 +281,11 @@ class PttTerm:
         if not self.read_flow and not hasattr(self, "macro_task"):
             if prevState == self._State.Unknown and newState == self._State.InPanel:
                 self.runPmoreConfig()
-        elif hasattr(self, "macro_task") and not self.macro_task.done():
+        elif self.isMacroRunning():
             self.macro_event.set()
 
     def _refresh(self):
         lines = self.screen.display
-
-#        print("top   : '%s'" % lines[0])
-#        print("bottom: '%s'" % lines[-1])
 
         for input_pattern in [".+請?按.+鍵.*繼續", "請選擇", '搜尋.+', '\s*★快速切換']:
             if re.match(input_pattern, lines[-1]):
@@ -241,12 +316,12 @@ class PttTerm:
 #            print("Browse: %d%%" % percent, "Lines:", firstLine, "~", lastLine)
 
             if firstLine == 1:
+                if self.threadURL: self.thread.setURL(self.threadURL)
                 try:
                     board = re.match("\s+作者\s+.+看板\s+(\w+)\s*$", lines[0]).group(1)
 #                    print("Board: '%s'" % board)
                 except (AttributeError, IndexError):
                     print("Board missing: '%s'" % lines[0])
-
                 try:
                     title = re.match("\s+標題\s+(\S.+)\s*$", lines[1]).group(1)
 #                    print("Title: '%s'" % title)
@@ -294,15 +369,31 @@ class PttTerm:
             self.flow.sendToClient(data)
 
     # the client message will be dropped if false is returned
-    def userEvent(self, event: UserEvent):
+    # the current user event will be replaced if a bytes object is returned
+    def userEvent(self, event: UserEvent, uncommitted = False):
         print("User event:", UserEvent.name(event))
 
         if event != UserEvent.Unknown and self.state == self._State.InThread:
             if self.thread.is_prohibited(event):
                 return False
 
+        # replace Right/Enter with 'Q' for getting the URL
+        # 'r' is left out deliberatelly as fallback if something goes wrong to prevent from reading a thread
+        if self.autoURL and (self.threadURL is None) and \
+           (event in [UserEvent.Key_Right, UserEvent.Key_Enter]) and \
+           self.state.is_exact(self._State.InBoard):
+            self.state = self._State.InBoardWaitingURL
+            self._userEvent = event
+            return b"Q"
+
+        if uncommitted:
+            if event == UserEvent.Key_Up:
+                self.cursor_up()
+            elif event == UserEvent.Key_Down:
+                self.cursor_down()
+
         self._userEvent = event
-        return True
+        return event
 
     # return value:
     #   False: to break

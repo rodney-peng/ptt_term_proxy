@@ -76,9 +76,7 @@ class PttProxy:
     def client_message(self, content):
         print("\nclient:", content)
 
-        if len(content) == 1 and UserEvent.isViewable(content[0]):
-            return pttTerm.userEvent(content[0])
-        else:
+        if len(content) > 1 or not UserEvent.isViewable(content[0]):
             # need to reset userEvent for unknown keys otherwise PttTerm.pre_refresh() would go wrong
             pttTerm.userEvent(UserEvent.Unknown)
 
@@ -100,21 +98,24 @@ class PttProxy:
         number = ""
         n = 0
         while n < len(content):
+            resp = None
             b = content[n]
 
-            if state != sNUM:
-                number = ""
+            if state != sNUM: number = ""
 
             c = chr(b)
             if state == None:
+                cmdBegin = n
                 if c == sESC:
                     state = sESC
                 elif c == '\b':
-                    if not pttTerm.userEvent(UserEvent.Key_Backspace): return False
+                    resp = pttTerm.userEvent(UserEvent.Key_Backspace)
                 elif c == '\r':
-                    if not pttTerm.userEvent(UserEvent.Key_Enter): return False
+                    resp = pttTerm.userEvent(UserEvent.Key_Enter)
                 elif b == IAC:
                     state = IAC
+                elif UserEvent.isViewable(b):
+                    resp = pttTerm.userEvent(b)
             elif state == sESC:
                 if c == sCSI:
                     state = sCSI
@@ -123,19 +124,17 @@ class PttProxy:
             elif state == sCSI:
                 if 'A' <= c <= 'H':
                     if c == 'A':
-                        if not pttTerm.userEvent(UserEvent.Key_Up): return False
-                        if uncommitted: pttTerm.cursor_up()
+                        resp = pttTerm.userEvent(UserEvent.Key_Up, uncommitted)
                     elif c == 'B':
-                        if not pttTerm.userEvent(UserEvent.Key_Down): return False
-                        if uncommitted: pttTerm.cursor_down()
+                        resp = pttTerm.userEvent(UserEvent.Key_Down, uncommitted)
                     elif c == 'C':
-                        if not pttTerm.userEvent(UserEvent.Key_Right): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_Right)
                     elif c == 'D':
-                        if not pttTerm.userEvent(UserEvent.Key_Left): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_Left)
                     elif c == 'F':
-                        if not pttTerm.userEvent(UserEvent.Key_End): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_End)
                     elif c == 'H':
-                        if not pttTerm.userEvent(UserEvent.Key_Home): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_Home)
                     else:
                         print("xterm key:", self.xterm_keys[b - ord('A')])
                 elif '0' <= c <= '9':
@@ -152,13 +151,13 @@ class PttProxy:
                 elif c == '~':
                     number = int(number)
                     if number == 5:
-                        if not pttTerm.userEvent(UserEvent.Key_PgUp): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_PgUp)
                     elif number == 6:
-                        if not pttTerm.userEvent(UserEvent.Key_PgDn): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_PgDn)
                     elif number in [1, 7]:
-                        if not pttTerm.userEvent(UserEvent.Key_Home): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_Home)
                     elif number in [4, 8]:
-                        if not pttTerm.userEvent(UserEvent.Key_End): return False
+                        resp = pttTerm.userEvent(UserEvent.Key_End)
                     elif 1 <= number <= len(self.vt_keys):
                         print("vt key:", self.vt_keys[number-1])
                 state = None
@@ -184,8 +183,16 @@ class PttProxy:
                     state = None
                 else:
                     break
+
+            if isinstance(resp, bytes):
+                # replace the current input with resp
+                content = content[:cmdBegin] + resp + content[n+1:]
+            elif resp is False:
+                return False
+
             n += 1
-        return True
+
+        return content
 
     cmd_formats = {'.':  "pttTerm.{data}",
                    '?':  "print(pttTerm.{data})",
@@ -440,17 +447,21 @@ class PttProxy:
             def insertToClient(data):
                 if self.firstSegment:
                     # insert ahead of the first segment
+                    print("Insert to client: ", len(data))
                     self.current_message.content = data + self.current_message.content
                 else:
                     self.standby_msgs += data
+                    print("Queued to insert: ", len(data))
 
             @staticmethod
             def sendToClient(data):
                 if self.lastSegment:
                     # piggyback to the last segment
+                    print("Piggyback to client: ", len(data))
                     self.current_message.content += data
                 else:
                     self.standby_msgs += data
+                    print("Queued to send: ", len(data))
 
         if self.is_done: return
 
@@ -471,7 +482,11 @@ class PttProxy:
             self.purge_standby_message(flow)
             self.purge_server_message(self.server_event)
 
-            if not self.client_message(flow_msg.content):
+            resp = self.client_message(flow_msg.content)
+            if isinstance(resp, bytes):
+                if resp != flow_msg.content: print("replace client message:", resp)
+                flow_msg.content = resp
+            else:
                 print("Drop client message!")
                 flow_msg.drop()
         else:
@@ -479,7 +494,12 @@ class PttProxy:
             self.lastSegment  = (len(flow_msg.content) < 1021) # see the comment in server_message() for why it's 1021
             self.current_message = flow_msg
 
+            original_content = flow_msg.content
+
             self.server_message(flow_msg.content)
+
+            if self.current_message.content is not original_content:
+                print("server -> client, changed:", len(self.current_message.content))
 
             del self.current_message
             self.firstSegment = False

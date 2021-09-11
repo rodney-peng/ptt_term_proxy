@@ -77,6 +77,12 @@ class PttThread:
         except Exception as e:
             traceback.print_exc()
 
+    def setURL(self, url: str):
+        if url != self.url:
+            self.url = url
+            self.urlLine = 0
+            self.scanURL()
+
     def view(self, lines, first: int, last: int, atEnd: bool):
         assert 0 < first <= last
         assert last - first + 1 <= len(lines)
@@ -172,20 +178,35 @@ class PttThread:
     def scanURL(self):
         if self.lastLine < 3:
             return None
-        if self.url:
+        if self.url and self.urlLine:
             return self.url
 
-        i = self.lastLine - 3
-        while i > 0:
-            if self.lines[i] == "--" and \
-               self.lines[i+1].startswith("※ 發信站: 批踢踢實業坊") and \
-               self.lines[i+2].startswith("※ 文章網址:"):
-                self.url = (self.lines[i+2])[7:].strip()
-                self.urlLine = (i+2)+1
-                # article lines has no floor
-                self.floors[0:self.urlLine] = [None] * self.urlLine
-                return self.url
-            i -= 1
+        if self.url:
+            # top-down as we are confident what the URL is
+            i = 2
+            while i < self.lastLine - 2:
+                if self.lines[i].startswith("※ 發信站: 批踢踢實業坊") and \
+                   self.lines[i+1].startswith("※ 文章網址:") and \
+                  (self.lines[i+1])[7:].strip() == self.url:
+                    self.urlLine = (i+1)+1
+                    # article lines has no floor
+                    self.floors[0:self.urlLine] = [None] * self.urlLine
+                    return self.url
+                i += 1
+        else:
+            # bottom-up to try to avoid collision
+            i = self.lastLine - 3
+            while i > 0:
+                # there is thread without the leading "--" line
+                if self.lines[i] == "--" and \
+                   self.lines[i+1].startswith("※ 發信站: 批踢踢實業坊") and \
+                   self.lines[i+2].startswith("※ 文章網址:"):
+                    self.url = (self.lines[i+2])[7:].strip()
+                    self.urlLine = (i+2)+1
+                    # article lines has no floor
+                    self.floors[0:self.urlLine] = [None] * self.urlLine
+                    return self.url
+                i -= 1
 
         return None
 
