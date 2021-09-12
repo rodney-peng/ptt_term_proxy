@@ -4,6 +4,7 @@ import signal
 import asyncio
 import socket
 import traceback
+import copy
 
 from mitmproxy import http, ctx
 from mitmproxy.proxy import layer, layers
@@ -16,23 +17,24 @@ pttTerm = ptt_term.PttTerm(128, 32)
 
 class PttProxy:
 
-    sock_filename = os.path.join(os.path.normpath("/"), "tmp", ".ptt_proxy")
-
     def __init__(self):
         self.reset()
+        self.wslayer = None
+        self.is_running = False
         self.is_done = False
+
+        # only immutable attribute refers to new object by assignment but PttProxy.last_cmds is not
+        self.last_cmds = copy.copy(self.last_cmds)
 
     def reset(self):
         self.server_msgs = bytes()      # to be feed to the screen
         self.standby_msgs = bytes()     # to be sent to the client
+
+        # server task depends on flow
         if hasattr(self, "server_task") and not self.server_task.done():
             self.server_task.cancel()
         if hasattr(self, "server_event") and self.server_event.is_set():
             self.server_event.clear()
-        if hasattr(self, "sock_server"):
-            self.sock_server.close()
-        if hasattr(self, "sock_task") and not self.sock_task.done():
-            self.sock_task.cancel()
 
     # feed to the screen
     # event must be checked if not None
@@ -59,7 +61,7 @@ class PttProxy:
         if self.firstSegment: pttTerm.pre_update()
 
         n = len(content)
-        print("\nserver: (%d)" % n)
+#        print("\nserver: (%d)" % n)
 
         # dirty trick to identify the last segment with size
         # (FIXME) Done: handled in server_msg_timeout()
@@ -194,121 +196,6 @@ class PttProxy:
 
         return content
 
-    cmd_formats = {'.':  "pttTerm.{data}",
-                   '?':  "print(pttTerm.{data})",
-                   '!':  "{data}",
-                   '\\': "print({data})" }
-
-    '''
-        Tips for debugging:
-        1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
-        2. then run "vars(self)" or "vars(cls)" to see what attributes are available
-        3. enter the leading character to repeat the last command: '.', '?', '!', backslash
-        4. runtime binding, e.g. to debug a class method "a_method" in "module.py":
-
-           a_func(...):                 # ordinary function
-           a_bound_func(bound, ...):    # ordinary function takes at least one argument
-           class C:
-                a_method(self):
-                @classmethod
-                a_class_method(cls):
-                @staticmethod
-                a_static_method():
-
-           1. modify the code and bind self.a_method:
-
-            "!import types, module"
-            "!self.a_method = types.MethodType(module.a_bound_func, self)     # bound will be an instance
-            "!self.__class__.a_method = module.a_bound_func                   # bound will be an instance
-            "!self.__class__.a_method = module.C.a_method
-            "!self.__class__.a_class_method = classmethod(module.a_bound_func)     # bound will be an class
-            "!self.__class__.a_static_method = staticmethod(module.a_func)
-
-            !!! Don't run "!self.a_method = module.C.a_method" !!!
-
-           Please note that the visibility of self.a_method is now in the modified "module.py".
-
-           2. continue to modify, reload and rebinds:
-
-            delete the module file from __pycache__
-            "!from importlib import reload"
-            "!reload(module)"
-
-           3. rebind a global function:
-
-            "!global a_func; a_func = module.a_func"
-    '''
-    async def sock_client_task(self, reader, writer):
-        from contextlib import redirect_stdout, redirect_stderr
-
-        class _file():
-            @staticmethod
-            def write(data: str):
-                writer.write(data.encode())
-
-            @staticmethod
-            def flush():
-                pass
-
-        _out = sys.stdout
-        _err = sys.stderr
-
-        last_cmds = {'.': None, '?': None, '!': None, '\\': None}
-        while True:
-            if self.is_done or self.sock_task.done(): break
-            writer.write("> ".encode())
-            await writer.drain()
-
-            data = await reader.readline()
-            if not data: break
-
-            data = data.decode().rstrip('\n').strip()
-            if not data: continue
-            print("\ncommand:", data)
-
-            if data[0] not in self.cmd_formats:
-                data = '\\' + data
-            if len(data) > 1:
-                cmd = self.cmd_formats[data[0]].format(data=data[1:])
-                last_cmds[data[0]] = cmd
-            else:
-                cmd = last_cmds[data[0]]
-
-            if cmd:
-                print("exec:", cmd)
-                with redirect_stdout(_file), redirect_stderr(_file):
-                    try:
-                        exec(cmd)
-                    except Exception:
-                        traceback.print_exc()
-                '''
-                try:
-                    sys.stdout = _file
-                    sys.stderr = _file
-                    exec(cmd)
-                except Exception:
-                    traceback.print_exc()
-                finally:
-                    sys.stdout = _out
-                    sys.stderr = _err
-                '''
-                await writer.drain()
-        writer.close()
-        print("sock_client_task finished")
-
-    async def sock_server_task(self):
-        print("sock_server_task started,", self.sock_task)
-
-        try:
-            self.sock_server = await asyncio.start_unix_server(self.sock_client_task, self.sock_filename)
-            await self.sock_server.serve_forever()
-        except asyncio.CancelledError:
-            print("sock_server_task cancelled!")
-        except Exception:
-            traceback.print_exc()
-
-        print("sock_server_task finished,", self.sock_task)
-
     async def server_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
         cancelled = False
@@ -351,6 +238,29 @@ class PttProxy:
 
         print("server_msg_timeout() finished")
 
+    # self-defined hooks
+
+    def on_signal(self, signum: int):
+        print("Addon got", signum, "(%d)" % int(signum))
+        print("server_msgs:", len(self.server_msgs))
+        if hasattr(self, "server_event"):
+            print("server_event:", self.server_event)
+        if hasattr(self, "server_task"):
+            print("server_task:", self.server_task)
+        pttTerm.showState()
+
+    cmd_formats = {'.':  "pttTerm.{data}",
+                   '?':  "print(pttTerm.{data})",
+                   '!':  "{data}",
+                   '\\': "print({data})" }
+
+    last_cmds = {'.': None, '?': None, '!': None, '\\': None}
+
+    # exception is handled on caller
+    def on_debug_command(self, data: str, lookup: callable):
+        command = lookup(self.cmd_formats, self.last_cmds, data)
+        if command: exec(command)
+
     # Addon management
 
     def load(self, loader):
@@ -358,7 +268,6 @@ class PttProxy:
         self.log_verbosity = "info"
         self.flow_detail = 1
         self.read_flow = False
-#        if not hasattr(ctx.master, "conn_watcher"):
 
     def configure(self, updated):
         if 'termlog_verbosity' in updated: self.log_verbosity = ctx.options.termlog_verbosity
@@ -368,28 +277,19 @@ class PttProxy:
             self.read_flow = bool(ctx.options.rfile)
 
     def running(self):
-        if hasattr(self, "is_running"): return
+        if self.is_running: return
+
         print(self, "running!")
         self.is_running = True
         print("log_verbosity:", self.log_verbosity)
         print("flow_detail:", self.flow_detail)
-        self.sock_task = asyncio.create_task(self.sock_server_task())
-        ptt_term.pop(pttTerm)
 
+    # the addon is still loaded even after done()
+    # it just will not receive event from the addon manager
     def done(self):
         print(self, "done!")
         self.reset()
-        ptt_term.push(pttTerm)
         self.is_done = True
-
-    def on_signal(self, signum):
-        print("Addon got", signum, "(%d)" % int(signum))
-        print("server_msgs:", len(self.server_msgs))
-        if hasattr(self, "server_event"):
-            print("server_event:", self.server_event)
-        if hasattr(self, "server_task"):
-            print("server_task:", self.server_task)
-        pttTerm.showState()
 
     # next_layer() is called to determine the next layer and return in nextlayer.layer
     def next_layer(self, nextlayer: layer.NextLayer):
@@ -397,46 +297,11 @@ class PttProxy:
         if len(_layers) and isinstance(_layers[-1], layers.HttpLayer):
             self.httplayer = _layers[-1]
             print("HttpLayer.streams:", _layers[-1].streams)
-            '''
-            # probably don't have stream yet
-            if len(_layers[-1].streams) == 1:
-                s = list(_layers[-1].streams.values())[0]
-                _layers = s.context.layers
-                if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
-                    self.wslayer = _layers[-1]
-            '''
 
     # Websocket lifecycle
 
     # reloading the addon script will not run the hook websocket_start()
-    # so we cannot initiate self.server_event, self.server_task here
     def websocket_start(self, flow: http.HTTPFlow):
-        print("websocket_start")
-        wslayer = getattr(self, "wslayer", None)
-        httplayer = getattr(self, "httplayer", None)
-        if not wslayer and httplayer:
-            print("HttpLayer.streams:", httplayer.streams)
-            if len(httplayer.streams) == 1:
-                s = list(httplayer.streams.values())[0]
-                _layers = s.context.layers
-                if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
-                    self.wslayer = wslayer = _layers[-1]
-        if wslayer:
-            print(wslayer)
-            ctx.master.hijackWebsocketLayer(wslayer)
-
-    def websocket_end(self, flow: http.HTTPFlow):
-        print("websocket_end")
-        pttTerm.reset()
-        self.reset()
-
-    def websocket_message(self, flow: http.HTTPFlow):
-        """
-            Called when a WebSocket message is received from the client or
-            server. The most recent message will be flow.messages[-1]. The
-            message is user-modifiable. Currently there are two types of
-            messages, corresponding to the BINARY and TEXT frame types.
-        """
         class ProxyFlow:
 
             @staticmethod
@@ -463,14 +328,40 @@ class PttProxy:
                     self.standby_msgs += data
                     print("Queued to send: ", len(data))
 
-        if self.is_done: return
+        print("websocket_start")
+        wslayer = getattr(self, "wslayer", None)
+        httplayer = getattr(self, "httplayer", None)
+        if not wslayer and httplayer:
+            print("HttpLayer.streams:", httplayer.streams)
+            if len(httplayer.streams) == 1:
+                s = list(httplayer.streams.values())[0]
+                _layers = s.context.layers
+                if len(_layers) and isinstance(_layers[-1], layers.WebsocketLayer):
+                    self.wslayer = wslayer = _layers[-1]
+        if wslayer:
+            print(wslayer)
+            ctx.master.websocketLayerStarted(wslayer)
 
         if not hasattr(self, "server_event"):
             self.server_event = asyncio.Event()
             self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-            pttTerm.flowStarted(ProxyFlow, self.read_flow)
+        pttTerm.flowStarted(ProxyFlow, self.read_flow)
 
-        assert flow.websocket is not None
+    def websocket_end(self, flow: http.HTTPFlow):
+        print("websocket_end")
+        if getattr(self, "wslayer", None):
+            ctx.master.websocketLayerEnded(self.wslayer)
+            self.httplayer = None
+            self.wslayer = None
+
+    def websocket_message(self, flow: http.HTTPFlow):
+        """
+            Called when a WebSocket message is received from the client or
+            server. The most recent message will be flow.messages[-1]. The
+            message is user-modifiable. Currently there are two types of
+            messages, corresponding to the BINARY and TEXT frame types.
+        """
+        if not self.is_running or self.is_done: return
 
         flow_msg = flow.websocket.messages[-1]
         if ctx.master.is_self_injected(flow_msg): return
@@ -520,6 +411,24 @@ class PttProxy:
         """
         print("websocket_error", flow)
 
+def reload(oldproxy, oldterm):
+    from mitmproxy.addonmanager import Loader
+    pttTerm.reload(oldterm)
+
+    addons[0].load(Loader(ctx.master))
+    addons[0].configure({'termlog_verbosity', 'flow_detail'})
+
+    addons[0].httplayer = getattr(oldproxy, "httplayer", None)
+    addons[0].wslayer   = getattr(oldproxy, "wslayer", None)
+
+    print("self.wslayer: ", addons[0].wslayer)
+
+    if addons[0].wslayer:
+        addons[0].websocket_start(addons[0].wslayer.flow)
+        # only valid in inPanel state
+        pttTerm.post_refresh()
+
+    addons[0].running()
 
 addons = [
     PttProxy()

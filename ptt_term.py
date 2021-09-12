@@ -17,15 +17,37 @@ from ptt_persist import PttPersist
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
 
+    '''
+    def __init__(self, columns, lines, cursor_hook=None):
+        self.cursor_hook = cursor_hook
+        super().__init__(columns, lines)
+
+    def cursor_up(self, count=None):
+        super().cursor_up(count)
+        if self.cursor_hook: self.cursor_hook(up=(count or 1))
+
+    def cursor_down(self, count=None):
+        super().cursor_down(count)
+        if self.cursor_hook: self.cursor_hook(down=(count or 1))
+
+    def cursor_position(self, line=None, column=None):
+        super().cursor_position(line, column)
+        if self.cursor_hook: self.cursor_hook(line=(line or 1), column=(column or 1))
+
+    def cursor_to_line(self, line=None):
+        super().cursor_to_line(line)
+        if self.cursor_hook: self.cursor_hook(line=(line or 1))
+    '''
+
     def draw(self, char):
         # the current character won't be null, will it?
         #     assert self.buffer[self.cursor.y][self.cursor.x].data != ''
-        super(MyScreen, self).draw(char)
+        super().draw(char)
 
         # the cursor will not be at the last column, won't it?
         #     assert self.cursor.x < self.columns
         if ord(char) > 0xff:
-            super(MyScreen, self).draw('')
+            super().draw('')
 
 
 # for event debugging
@@ -37,17 +59,17 @@ class MyDebugStream(pyte.DebugStream):
         super(pyte.ByteStream, self).feed(chars)
 
 
-def showScreen(screen):
-    lines = screen.display
-    print("Cursor:", screen.cursor.y, screen.cursor.x, "Lines:", len(lines))
-    for n, line in enumerate(lines, 1):
-        print("%2d" % n, "'%s'" % line)
-
-def showCursor(screen):
-    print("Cursor:", screen.cursor.y, screen.cursor.x, "'%s'" % screen.display[screen.cursor.y])
-
-
 class PttTerm:
+    '''
+        This is a virtual terminal reflects client's screen however not absolutely synchronized.
+        It can run macros in which inputs are sent to the server on the behavior of client.
+        Floor number is inserted to messages from the server and only appears on a client's screen.
+        Client's message may be altered or dropped depending on feature or desire.
+
+        client <-- proxy --> server
+                     |
+                   PttTerm (virtual terminal)
+    '''
 
     Unknown = 0
     Waiting = 1
@@ -80,6 +102,7 @@ class PttTerm:
         def __ne__(self, other):
             return not self.__eq__(other)
 
+        # If there is only one state to check, 'is' also works
         def is_exact(self, *others):
             for other in others:
                 if isinstance(other, self.__class__) and self.state == other.state and self.substate == other.substate:
@@ -99,7 +122,7 @@ class PttTerm:
     def __init__(self, columns, lines):
         self.reset()
 
-        self.screen = MyScreen(columns, lines)
+        self.screen = MyScreen(columns, lines) # self.cursor_hook
         # self.stream = MyDebugStream(only=["draw", "cursor_position"])
         self.stream = pyte.Stream()
         self.stream.attach(self.screen)
@@ -126,6 +149,27 @@ class PttTerm:
             self.macro_task.cancel()
             del self.macro_task
 
+    def reload(self, retired):
+        print("PttTerm.reload()!")
+        retired.persistor.close()
+
+        self.screen = retired.screen
+        self.stream = retired.stream
+        self.thread = retired.thread
+
+    def showScreen(self):
+        self.showCursor(False)
+        lines = self.screen.display
+        for n, line in enumerate(lines, 1):
+            print("%2d" % n, "'%s'" % line)
+
+    def showCursor(self, lineAtCursor=True):
+        print("Cursor:", self.screen.cursor.y + 1, self.screen.cursor.x + 1, end = " ")
+        if lineAtCursor:
+            print("'%s'" % self.screen.display[self.screen.cursor.y])
+        else:
+            print("lines: %d" % self.screen.lines)
+
     def resize(self, columns, lines):
         self.screen.resize(lines, columns)
 
@@ -137,6 +181,14 @@ class PttTerm:
 
     def feed(self, data: bytes):
         self.stream.feed(data.decode("big5uao", 'replace'))
+
+    # may be called during __init__()
+    def cursor_hook(self, **kwargs):
+        # "== self._State.InBoard" doesn't work here
+        if getattr(self, "state", None) is self._State.InBoard:
+            if self.threadURL:
+                print("Cursor moved!", kwargs)
+                self.threadURL = None
 
     def flowStarted(self, flow, from_file: bool):
         self.flow = flow    # ptt_proxy.websocket_message.ProxyFlow
@@ -213,36 +265,44 @@ class PttTerm:
             self.updateThread(*self.threadUpdated, True)
             self.threadUpdated = None
 
-    # before the data is feed to the screen, some segments have already been sent to the client
+    def scanCursorLine(self):
+        self.showCursor()
+
+    # before the screen is updated, some segments have already been sent to the client
     def pre_refresh(self):
-        if self.state == self._State.InBoard and \
-           self._userEvent in [UserEvent.Key_Right, UserEvent.Key_Enter]:
-            showCursor(self.screen)     # entering a thread
+        print("pre_refresh:", self.state, UserEvent.name(self._userEvent))
+        # "== self._State.InBoard" doesn't work here
+        if self.state is self._State.InBoard and self.isThreadEnteringEvent(self._userEvent):
+            # entering a thread
+            if self.threadURL: self.thread.setURL(self.threadURL)
+            self.scanCursorLine()
 
         if self.state == self._State.InThread and self.thread.isSwitchEvent(self._userEvent):
+            # left a thread
             self.thread.switch(self.persistThread)
+            # TODO: don't clear until cursor is moved
+            self.threadURL = None
 
     def scanURL(self):
+        url = None
         lines = self.screen.display
-        for i in range(2, self.screen.lines - 4):   # the box spans 4 lines
+        for i in range(2, self.screen.lines - 4):   # the box spans at least 4 lines
             if lines[i  ].startswith("│ 文章代碼(AID):") and \
                lines[i+1].startswith("│ 文章網址:"):
 
                 url = (lines[i+1])[7:].strip(" │")
-                print("URL found:", i+1, url)
                 board_fn = PttThread.url2fn(url)
+                _aidc = re.match("\ *?#([0-9A-Za-z-_]{8})", (lines[i])[12:])
 
-                _aid = re.match("\ *?#([0-9A-Za-z-_]{8})", (lines[i])[12:])
-                if _aid: aidc = _aid.group(1)
-
-                if board_fn and _aid and aidc == PttThread.fn2aidc(board_fn[1]):
-                    print("AIDS found:", board_fn[0], aidc)
-                    return url
+                if board_fn and _aidc and \
+                   PttThread.fn2aidc(board_fn[1]) == _aidc.group(1):
                     break
-        return None
+                else:
+                    url = None
+        return url
 
 
-    # after the data is feed to the screen
+    # after the screen is updated
     def post_refresh(self):
         newState = self._refresh()
 
@@ -267,13 +327,13 @@ class PttTerm:
         self.state = newState
 
         if prevState.is_exact(self._State.InBoardWaitingURL, self._State.InBoardWaitingRefresh) and \
-           newState.is_exact(self._State.InBoard):
+           newState is self._State.InBoard:
             if self.threadURL:
-                self.flow.sendToServer(b'r')   # to enter the thread
+                self.flow.sendToServer(b'\r')   # to enter the thread
 
+        # out of a thread and not caught by self.thread.isSwitchEvent() in pre_refresh()
         # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
-            self.threadURL = None
             self.threadUpdated = None
             self.thread.switch(self.persistThread)
 
@@ -303,8 +363,6 @@ class PttTerm:
                 print("In board: '%s'" % board)
             except (AttributeError, IndexError):
                 print("Board missing: '%s'" % lines[0])
-
-            showCursor(self.screen)
             return self._State.InBoard
 
         # note the pattern '\ *?\d+' to match variable percentage digits
@@ -316,7 +374,6 @@ class PttTerm:
 #            print("Browse: %d%%" % percent, "Lines:", firstLine, "~", lastLine)
 
             if firstLine == 1:
-                if self.threadURL: self.thread.setURL(self.threadURL)
                 try:
                     board = re.match("\s+作者\s+.+看板\s+(\w+)\s*$", lines[0]).group(1)
 #                    print("Board: '%s'" % board)
@@ -368,6 +425,11 @@ class PttTerm:
         else:
             self.flow.sendToClient(data)
 
+    @staticmethod
+    def isThreadEnteringEvent(event: UserEvent):
+        # 'r' is left out deliberatelly as fallback if something goes wrong to prevent from reading a thread
+        return event in [UserEvent.Key_Right, UserEvent.Key_Enter]
+
     # the client message will be dropped if false is returned
     # the current user event will be replaced if a bytes object is returned
     def userEvent(self, event: UserEvent, uncommitted = False):
@@ -377,11 +439,9 @@ class PttTerm:
             if self.thread.is_prohibited(event):
                 return False
 
-        # replace Right/Enter with 'Q' for getting the URL
-        # 'r' is left out deliberatelly as fallback if something goes wrong to prevent from reading a thread
+        # replace event with 'Q' for getting the URL
         if self.autoURL and (self.threadURL is None) and \
-           (event in [UserEvent.Key_Right, UserEvent.Key_Enter]) and \
-           self.state.is_exact(self._State.InBoard):
+           self.isThreadEnteringEvent(event) and self.state.is_exact(self._State.InBoard):
             self.state = self._State.InBoardWaitingURL
             self._userEvent = event
             return b"Q"
@@ -504,21 +564,6 @@ class PttTerm:
         if doneHook: doneHook(macros)
         print("run_macro task finished!")
 
-pushedTerm = None
-
-def push(term):
-    global pushedTerm
-    pushedTerm = term
-    pushedTerm.persistor.close()
-
-def pop(term):
-    global pushedTerm
-    if pushedTerm:
-        term.screen = pushedTerm.screen
-        term.stream = pushedTerm.stream
-        term.flow   = pushedTerm.flow
-        term.read_flow = pushedTerm.read_flow
-        term.post_refresh()
-
-        pushedTerm = None
+if __name__ == "__main__":
+    PttTerm(128, 32)
 

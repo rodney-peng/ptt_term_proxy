@@ -15,6 +15,8 @@ import asyncio
 import signal
 import typing
 import traceback
+from dataclasses import dataclass
+import importlib
 
 from mitmproxy import options, optmanager, exceptions
 from mitmproxy.tools.main import process_options
@@ -22,12 +24,25 @@ from mitmproxy.tools.dump import DumpMaster
 from mitmproxy.tools import cmdline
 from mitmproxy.utils import debug, arg_check
 from mitmproxy.addons.script import load_script
-
+from mitmproxy.hooks import Hook
 from mitmproxy.proxy.layers.websocket import WebSocketMessageInjected, WebsocketLayer
 from mitmproxy.proxy import events, layer
 
+import ptt_proxy
 
-ptt_proxy = "ptt_proxy.py"
+# handler = on_signal()
+@dataclass
+class OnSignalHook(Hook):
+    signum: int
+
+# handler = on_debug_command()
+@dataclass
+class OnDebugCommandHook(Hook):
+    command: str
+    lookup: callable
+
+
+ptt_proxy_script = "ptt_proxy.py"
 
 class myDumpMaster(DumpMaster):
 
@@ -43,16 +58,23 @@ class myDumpMaster(DumpMaster):
         assert self.proxyserver is not None
 
         # wthout script watcher
-        mod = load_script(os.path.expanduser(ptt_proxy))
-        self.addons.add(mod)
+        #self.ptt_proxy = load_script(os.path.expanduser(ptt_proxy_script))
+        self.ptt_proxy = ptt_proxy
+        self.addons.add(self.ptt_proxy)
 
         # with script watcher, option "scripts" is only available once the default addons are loaded
-        #self.options.update(scripts=[ptt_proxy])
+        #self.options.update(scripts=[ptt_proxy_script])
         #print(self.addons.lookup)
+
+        # self.ptt_proxy is a Python module, the same value returned from load_script()
+        #self.ptt_proxy = self.addons.get(ptt_proxy_script)
+        #assert self.ptt_proxy is not None
 
         self.options.update(onboarding=False)
 
         #self.commands.add("self-inject.websocket", self.inject_websocket)
+
+        self.sock_task = asyncio.ensure_future(self.sock_server_task())
 
         self._watchdog_time = 0
         self.conn_task = asyncio.ensure_future(self.conn_watcher())
@@ -61,21 +83,15 @@ class myDumpMaster(DumpMaster):
         print("master shutdown!")
         if hasattr(self, "conn_task") and not self.conn_task.done():
             self.conn_task.cancel()
+        if hasattr(self, "sock_server"):
+            self.sock_server.close()
+        if hasattr(self, "sock_task") and not self.sock_task.done():
+            self.sock_task.cancel()
         super().shutdown()
 
     def SIGUSR1(self):
-        from dataclasses import dataclass
-        from mitmproxy.hooks import Hook
-        # handler = on_signal()
-        @dataclass
-        class OnSignalHook(Hook):
-            signum: int
-
         print("master got SIGUSR1", self._watchdog_time)
-        m = self.addons.get(ptt_proxy)
-        if m:
-            # m is a Python module
-            self.addons.invoke_addon(m, OnSignalHook(signal.SIGUSR1))
+        self.addons.invoke_addon(self.ptt_proxy, OnSignalHook(signal.SIGUSR1))
 
     def SIGUSR2(self):
         print("master got SIGUSR2", self._watchdog_time)
@@ -142,7 +158,7 @@ class myDumpMaster(DumpMaster):
         return False
 
     # only applies to a WebsocketLayer in start state
-    def hijackWebsocketLayer(self, wslayer: WebsocketLayer):
+    def websocketLayerStarted(self, wslayer: WebsocketLayer):
         '''
         # unlikely to get in start state
         if wslayer is None:
@@ -154,7 +170,7 @@ class myDumpMaster(DumpMaster):
             except Exception:
                 traceback.print_exc()
         '''
-        if isinstance(wslayer, WebsocketLayer):
+        if isinstance(wslayer, WebsocketLayer) and wslayer is not getattr(self, "wslayer", None):
             print(wslayer._handle_event)
             if wslayer._handle_event in [wslayer.__class__.start, wslayer.start]:
                 self.wsl_relay_messages = wslayer.relay_messages
@@ -164,10 +180,14 @@ class myDumpMaster(DumpMaster):
                 return True
         return False
 
+    def websocketLayerEnded(self, wslayer: WebsocketLayer):
+        pass
+
     from mitmproxy.proxy.utils import expect
 
     @expect(events.DataReceived, events.ConnectionClosed, WebSocketMessageInjected)
     def relay_websocket_messages(self, event: events.Event) -> layer.CommandGenerator[None]:
+        '''
         try:
             if isinstance(event, events.DataReceived):
                 target = type(event.connection).__name__.lower()
@@ -179,8 +199,22 @@ class myDumpMaster(DumpMaster):
                 print("\nws event:", event)
         except Exception:
             traceback.print_exc()
+        '''
 
         yield from self.wsl_relay_messages(event)
+
+    def reload_ptt_proxy(self):
+        from importlib import reload
+
+        self.addons.remove(self.ptt_proxy)
+
+        oldproxy = self.ptt_proxy.addons[0]
+        oldterm = self.ptt_proxy.pttTerm
+
+        self.ptt_proxy = reload(ptt_proxy)
+
+        self.addons.add(self.ptt_proxy)     # invoke LoadHook
+        self.ptt_proxy.reload(oldproxy, oldterm)
 
     async def conn_watcher(self):
         from mitmproxy.proxy.server import TimeoutWatchdog
@@ -201,6 +235,101 @@ class myDumpMaster(DumpMaster):
 
         print("conn_watcher finished!")
 
+    '''
+        Tips for debugging:
+        1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
+        2. then run "vars(self)" or "vars(cls)" to see what attributes are available
+        3. enter the leading character to repeat the last command: '.', '?', '!', backslash
+        4. usually command is executed by addon's on_debug_command() method, prefixes the command with ':' to execute in the master
+        5. hot-reload an addon, e.g. ptt_proxy.py:
+
+            before run the following commands, go to "主功能表" in the terminal window
+
+            delete the module files from __pycache__
+            delete related modules from sys.modules:
+                ":!del sys.modules['ptt_term']"
+                ":!del sys.modules['ptt_thread']"
+            run the method reload_ptt_proxy():
+                ":.reload_ptt_proxy()"
+    '''
+    cmd_formats = {'.':  "self.{data}",
+                   '?':  "print(self.{data})",
+                   '!':  "{data}",
+                   '\\': "print({data})" }
+
+    async def sock_client_task(self, reader, writer):
+        def lookup(formats, last_cmds, command):
+            if command[0] not in formats:
+                prefix = '\\'
+                cmd = command
+            else:
+                prefix = command[0]
+                cmd = command[1:]
+            if cmd:
+                cmd = formats[prefix].format(data=cmd)
+                last_cmds[prefix] = cmd
+            else:
+                cmd = last_cmds[prefix]
+
+            print(f"command: '{command}' -> '{cmd}'")
+            return cmd
+
+        from contextlib import redirect_stdout, redirect_stderr
+
+        class _file():
+            @staticmethod
+            def write(data: str):
+                writer.write(data.encode())
+
+            @staticmethod
+            def flush():
+                pass
+
+        last_cmds = {'.': None, '?': None, '!': None, '\\': None}
+        while True:
+            if self.sock_task.done(): break
+            writer.write("> ".encode())
+            await writer.drain()
+
+            data = await reader.readline()
+            if not data: break
+
+            data = data.decode().rstrip('\n').strip()
+            if not data: continue
+
+            mycmd = (data[0] == ':')
+            if mycmd:
+                data = data[1:]
+                if not data: continue
+                with redirect_stdout(_file), redirect_stderr(_file):
+                    cmd = lookup(self.cmd_formats, last_cmds, data)
+                if not cmd: continue
+
+            with redirect_stdout(_file), redirect_stderr(_file):
+                try:
+                    if mycmd:
+                        exec(cmd)
+                    else:
+                        self.addons.invoke_addon(self.ptt_proxy, OnDebugCommandHook(data, lookup))
+                except Exception:
+                    traceback.print_exc()
+
+        writer.close()
+        print("sock_client_task finished")
+
+    async def sock_server_task(self):
+        print("sock_server_task started!")
+
+        sock_filename = os.path.join(os.path.normpath("/"), "tmp", ".ptt_proxy")
+        try:
+            self.sock_server = await asyncio.start_unix_server(self.sock_client_task, sock_filename)
+            await self.sock_server.serve_forever()
+        except asyncio.CancelledError:
+            print("sock_server_task cancelled!")
+        except Exception:
+            traceback.print_exc()
+
+        print("sock_server_task finished!")
 
 print("PID", os.getpid())
 

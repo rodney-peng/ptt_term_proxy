@@ -22,6 +22,6 @@ class UserEvent:
     def name(cls, event: int):
         assert event >= 0
         return ["-", "Up", "Down", "Right", "Left", "Enter", "PgUp", "PgDn",
-                "Home", "End", "BS"][event] if event <= cls.Key_Backspace else chr(event)
+                "Home", "End", "BS"][event] if event <= cls.Key_Backspace else f"'{chr(event)}'"
 
 
