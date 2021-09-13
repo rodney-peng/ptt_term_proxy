@@ -17,28 +17,6 @@ from ptt_persist import PttPersist
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
 
-    '''
-    def __init__(self, columns, lines, cursor_hook=None):
-        self.cursor_hook = cursor_hook
-        super().__init__(columns, lines)
-
-    def cursor_up(self, count=None):
-        super().cursor_up(count)
-        if self.cursor_hook: self.cursor_hook(up=(count or 1))
-
-    def cursor_down(self, count=None):
-        super().cursor_down(count)
-        if self.cursor_hook: self.cursor_hook(down=(count or 1))
-
-    def cursor_position(self, line=None, column=None):
-        super().cursor_position(line, column)
-        if self.cursor_hook: self.cursor_hook(line=(line or 1), column=(column or 1))
-
-    def cursor_to_line(self, line=None):
-        super().cursor_to_line(line)
-        if self.cursor_hook: self.cursor_hook(line=(line or 1))
-    '''
-
     def draw(self, char):
         # the current character won't be null, will it?
         #     assert self.buffer[self.cursor.y][self.cursor.x].data != ''
@@ -102,7 +80,7 @@ class PttTerm:
         def __ne__(self, other):
             return not self.__eq__(other)
 
-        # If there is only one state to check, 'is' also works
+        # If there is only one state to check, keyword 'is' also works
         def is_exact(self, *others):
             for other in others:
                 if isinstance(other, self.__class__) and self.state == other.state and self.substate == other.substate:
@@ -122,7 +100,7 @@ class PttTerm:
     def __init__(self, columns, lines):
         self.reset()
 
-        self.screen = MyScreen(columns, lines) # self.cursor_hook
+        self.screen = MyScreen(columns, lines)
         # self.stream = MyDebugStream(only=["draw", "cursor_position"])
         self.stream = pyte.Stream()
         self.stream.attach(self.screen)
@@ -138,6 +116,7 @@ class PttTerm:
         self.read_flow = False
         self.state = self._State()
         self.autoURL = True    # get URL/AIDC automatically when starts reading a thread
+        self.threadLine = None
         self.threadURL = None
 
         self.threadUpdated = None
@@ -153,9 +132,18 @@ class PttTerm:
         print("PttTerm.reload()!")
         retired.persistor.close()
 
+        # copying attributes from __dict__ only works if all attributes are system-defined objects
+        #vars(self).update(vars(retired))
+
+        # it's assumed the class of screen and stream are not changed.
         self.screen = retired.screen
         self.stream = retired.stream
-        self.thread = retired.thread
+
+        # just assign self.thread to retired.thread is insufficient for reloading.
+        # this is why ptt_thread.py seems not being reloaded.
+        #self.thread = retired.thread
+
+        self.thread.reload(retired.thread)
 
     def showScreen(self):
         self.showCursor(False)
@@ -181,14 +169,6 @@ class PttTerm:
 
     def feed(self, data: bytes):
         self.stream.feed(data.decode("big5uao", 'replace'))
-
-    # may be called during __init__()
-    def cursor_hook(self, **kwargs):
-        # "== self._State.InBoard" doesn't work here
-        if getattr(self, "state", None) is self._State.InBoard:
-            if self.threadURL:
-                print("Cursor moved!", kwargs)
-                self.threadURL = None
 
     def flowStarted(self, flow, from_file: bool):
         self.flow = flow    # ptt_proxy.websocket_message.ProxyFlow
@@ -265,23 +245,55 @@ class PttTerm:
             self.updateThread(*self.threadUpdated, True)
             self.threadUpdated = None
 
-    def scanCursorLine(self):
-        self.showCursor()
+    def _threadLine(self, line=0):
+        if line == 0:
+            line = self.screen.cursor.y
+        elif 1 <= line <= self.screen.lines:
+            line -= 1
+        else:
+            raise AssertionError(f"Line {line} is out of range 1~{self.screen.lines}")
+
+        return self.screen.display[line].lstrip(" >").rstrip()
+        '''
+        try:
+            # how about '★' sticky threads?
+            number = re.match("[\s>]\s*?([0-9]+)", line).group(1)
+        except (AttributeError, IndexError):
+            return 0
+        else:
+            number = int(number)
+            print(number, "'%s'" % line)
+            return number
+        '''
+
+    def isThreadDeleted(self, line=0):
+        if line == 0:
+            line = self.screen.cursor.y
+        elif 1 <= line <= self.screen.lines:
+            line -= 1
+        else:
+            raise AssertionError(f"Line {line} is out of range 1~{self.screen.lines}")
+
+        line = self.screen.display[line].strip()
+        # (本文已被刪除) or (已被xxx刪除)
+        deleted = re.search("-            □ (.*已被.*刪除)", line) is not None
+        print(deleted, "'%s'" % line)
+        return deleted
 
     # before the screen is updated, some segments have already been sent to the client
     def pre_refresh(self):
         print("pre_refresh:", self.state, UserEvent.name(self._userEvent))
         # "== self._State.InBoard" doesn't work here
-        if self.state is self._State.InBoard and self.isThreadEnteringEvent(self._userEvent):
+        if self.state is self._State.InBoard and self.isThreadEnteringEvent(self._userEvent, True):
             # entering a thread
-            if self.threadURL: self.thread.setURL(self.threadURL)
-            self.scanCursorLine()
+            if self.threadURL:
+                print("Set URL:", self.threadURL, "'%s'" % self.threadLine)
+                self.thread.setURL(self.threadURL)
 
         if self.state == self._State.InThread and self.thread.isSwitchEvent(self._userEvent):
             # left a thread
             self.thread.switch(self.persistThread)
-            # TODO: don't clear until cursor is moved
-            self.threadURL = None
+            # don't clear self.threadURL until cursor is moved
 
     def scanURL(self):
         url = None
@@ -307,7 +319,7 @@ class PttTerm:
         newState = self._refresh()
 
         if newState in [self._State.Waiting, self._State.Unknown]:
-            if self.state.is_exact(self._State.InBoardWaitingURL):
+            if self.state is self._State.InBoardWaitingURL:
                 self.threadURL = self.scanURL()
                 if newState == self._State.Waiting:
                     self.flow.sendToServer(b' ')    # escape from waiting
@@ -329,13 +341,22 @@ class PttTerm:
         if prevState.is_exact(self._State.InBoardWaitingURL, self._State.InBoardWaitingRefresh) and \
            newState is self._State.InBoard:
             if self.threadURL:
-                self.flow.sendToServer(b'\r')   # to enter the thread
+                # to enter the thread, send 'r' to skip replacement of 'Q' again
+                self.flow.sendToServer(b'r')
 
         # out of a thread and not caught by self.thread.isSwitchEvent() in pre_refresh()
         # this is necessary because user can search and jump to board while viewing thread
         if prevState == self._State.InThread and newState != self._State.InThread:
             self.threadUpdated = None
             self.thread.switch(self.persistThread)
+
+        # left a board or returned to board from a different thread
+        if (prevState == self._State.InBoard and \
+            newState not in [self._State.InBoard, self._State.InThread]) or \
+           (prevState == self._State.InThread and newState == self._State.InBoard and \
+            self.threadLine != self._threadLine()):
+            self.threadLine = None
+            self.threadURL = None
 
         # if flow is read from file, don't run macro
         if not self.read_flow and not hasattr(self, "macro_task"):
@@ -347,7 +368,7 @@ class PttTerm:
     def _refresh(self):
         lines = self.screen.display
 
-        for input_pattern in [".+請?按.+鍵.*繼續", "請選擇", '搜尋.+', '\s*★快速切換']:
+        for input_pattern in [".+請?按.+鍵.*繼續", "請選擇", '搜尋.+', '\s*★快速切換', '\s*跳至第幾項:']:
             if re.match(input_pattern, lines[-1]):
                 print("Waiting input...")
                 return self._State.Waiting
@@ -357,9 +378,12 @@ class PttTerm:
                 print("In panel:", panel)
                 return self._State.InPanel
 
+        # a regex for board name should be "[\w-]+"
+
         if re.match("\s*文章選讀", lines[-1]):
             try:
-                board = re.search("^\s*【板主:.+(看板|系列)《(\w+)》\s*$", lines[0]).group(2)
+                # In '系列' only displays the first thread for a series
+                board = re.search("^\s*【(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》\s*$", lines[0]).group(3)
                 print("In board: '%s'" % board)
             except (AttributeError, IndexError):
                 print("Board missing: '%s'" % lines[0])
@@ -375,7 +399,7 @@ class PttTerm:
 
             if firstLine == 1:
                 try:
-                    board = re.match("\s+作者\s+.+看板\s+(\w+)\s*$", lines[0]).group(1)
+                    board = re.match("\s+作者\s+.+看板\s+([\w-]+)\s*$", lines[0]).group(1)
 #                    print("Board: '%s'" % board)
                 except (AttributeError, IndexError):
                     print("Board missing: '%s'" % lines[0])
@@ -426,25 +450,41 @@ class PttTerm:
             self.flow.sendToClient(data)
 
     @staticmethod
-    def isThreadEnteringEvent(event: UserEvent):
-        # 'r' is left out deliberatelly as fallback if something goes wrong to prevent from reading a thread
-        return event in [UserEvent.Key_Right, UserEvent.Key_Enter]
+    def isCursorMovingEvent(event: UserEvent):
+        return event in [UserEvent.Key_Up, UserEvent.Key_Down, UserEvent.Key_PgUp, UserEvent.Key_PgDn,
+                         UserEvent.Key_Home, UserEvent.Key_End, UserEvent.Ctrl_B, UserEvent.Ctrl_F,
+                         # leaving a board
+                         UserEvent.Key_Left] or \
+               chr(event) in "pknjPN0$=[]<>-+S{}123456789q"     # 'q' as well
+
+    @staticmethod
+    def isThreadEnteringEvent(event: UserEvent, include_r=False):
+        return event in [UserEvent.Key_Right, UserEvent.Key_Enter] or \
+               (include_r and event == UserEvent.r)
 
     # the client message will be dropped if false is returned
     # the current user event will be replaced if a bytes object is returned
     def userEvent(self, event: UserEvent, uncommitted = False):
         print("User event:", UserEvent.name(event))
 
+        # most often event first
+
         if event != UserEvent.Unknown and self.state == self._State.InThread:
             if self.thread.is_prohibited(event):
                 return False
 
-        # replace event with 'Q' for getting the URL
-        if self.autoURL and (self.threadURL is None) and \
-           self.isThreadEnteringEvent(event) and self.state.is_exact(self._State.InBoard):
-            self.state = self._State.InBoardWaitingURL
-            self._userEvent = event
-            return b"Q"
+        if self.autoURL and (self.state is self._State.InBoard):
+            if self.isCursorMovingEvent(event):
+                print("Clear URL:", self.threadURL, "'%s'" % self.threadLine)
+                self.threadLine = None
+                self.threadURL = None
+            elif self.isThreadEnteringEvent(event) and \
+                 self.threadLine is None and not self.isThreadDeleted():
+                # replace event with 'Q' for getting the URL
+                self.state = self._State.InBoardWaitingURL
+                self.threadLine = self._threadLine()
+                self._userEvent = event
+                return b"Q"
 
         if uncommitted:
             if event == UserEvent.Key_Up:

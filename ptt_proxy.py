@@ -27,6 +27,8 @@ class PttProxy:
         self.last_cmds = copy.copy(self.last_cmds)
 
     def reset(self):
+        self.firstSegment = False
+        self.lastSegment  = False
         self.server_msgs = bytes()      # to be feed to the screen
         self.standby_msgs = bytes()     # to be sent to the client
 

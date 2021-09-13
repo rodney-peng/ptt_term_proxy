@@ -34,6 +34,10 @@ class PttThread:
         self.atBegin = self.atEnd = False
         self.waitingForInput = False
 
+    def reload(self, retired):
+        # works only if all attributes are system-defined objects
+        vars(self).update(vars(retired))
+
     # remove attributes which don't need to persist
     # It's for PttThreadPersist only but is here for symmetrical purpose.
     # When attributes are changed in clear(), change in removeForPickling() and initiateUnpickled() as well.
@@ -191,10 +195,12 @@ class PttThread:
                     self.urlLine = (i+1)+1
                     # article lines has no floor
                     self.floors[0:self.urlLine] = [None] * self.urlLine
+                    print("scanURL top-down", self.url, "at", self.urlLine)
                     return self.url
                 i += 1
         else:
             # bottom-up to try to avoid collision
+            print("scanURL bottom-up")
             i = self.lastLine - 3
             while i > 0:
                 # there is thread without the leading "--" line
@@ -247,7 +253,8 @@ class PttThread:
     def setWaitingState(self, enabled: bool):
         self.waitingForInput = enabled
 
-    # don't switch thread by Up/BS at the first line, or Down/Enter/Space at the last line
+    # deliberate to prohibit thread switch by Up/BS at the first line, or Down/Enter/Space at the last line
+    # It makes little sense to me to browse thread blindly. Use those in isSwitchEvent() if desired.
     def is_prohibited(self, event: UserEvent):
         return False if self.waitingForInput else ( \
                (event in [UserEvent.Key_Up, UserEvent.Key_Backspace] and self.atBegin) or \
@@ -267,7 +274,7 @@ class PttThread:
                (not self.is_prohibited(event)) and ( \
                (event == UserEvent.Key_Left) or \
                (event == UserEvent.Key_Right and self.atEnd) or \
-               (chr(event) in "qfb]+[-=tAasQ") )
+               (chr(event) in ("fb[]+-=tAa" + "qsQ")) )
 
     def switch(self, pickler):
         if self.lastLine == 0: return False

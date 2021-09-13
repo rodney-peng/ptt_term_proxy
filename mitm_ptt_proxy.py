@@ -251,6 +251,8 @@ class myDumpMaster(DumpMaster):
                 ":!del sys.modules['ptt_thread']"
             run the method reload_ptt_proxy():
                 ":.reload_ptt_proxy()"
+
+            Please don't delete 'ptt_proxy' from sys.modules. Doing so causes error.
     '''
     cmd_formats = {'.':  "self.{data}",
                    '?':  "print(self.{data})",
