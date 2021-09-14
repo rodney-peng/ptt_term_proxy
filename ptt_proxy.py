@@ -5,201 +5,113 @@ import asyncio
 import socket
 import traceback
 import copy
+from dataclasses import dataclass
 
 from mitmproxy import http, ctx
 from mitmproxy.proxy import layer, layers
 
-from user_event import UserEvent
-import ptt_term
-
-pttTerm = ptt_term.PttTerm(128, 32)
+from user_event import ProxyEvent
+from ptt_terminal import PttTerminal
 
 
-class PttProxy:
+class PttFlow:
 
-    def __init__(self):
-        self.reset()
-        self.wslayer = None
-        self.is_running = False
-        self.is_done = False
+    def __init__(self, flow):
+        self.flow = flow
+        self.terminal = PttTerminal(128, 32, self)
+        self.msg_to_terminal = b''
 
-        # only immutable attribute refers to new object by assignment but PttProxy.last_cmds is not
-        self.last_cmds = copy.copy(self.last_cmds)
+        self.server_event = asyncio.Event()
+        self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
 
-    def reset(self):
-        self.firstSegment = False
-        self.lastSegment  = False
-        self.server_msgs = bytes()      # to be feed to the screen
-        self.standby_msgs = bytes()     # to be sent to the client
-
-        # server task depends on flow
-        if hasattr(self, "server_task") and not self.server_task.done():
+    def done(self):
+        self.server_event.clear()
+        if not self.server_task.done():
             self.server_task.cancel()
-        if hasattr(self, "server_event") and self.server_event.is_set():
-            self.server_event.clear()
 
-    # feed to the screen
-    # event must be checked if not None
-    def purge_server_message(self, event: asyncio.Event):
+    @dataclass
+    class EventContext:
+        dropped: bool = False
+        replace: bytes = None
+        insertToClient: bytes = b''
+        sendToClient:   bytes = b''
+        insertToServer: bytes = b''
+        sendToServer:   bytes = b''
+
+    def terminal_events(self, handler, evctx: EventContext):
+        for event in handler:
+            if event._type == ProxyEvent.DROP:
+                evctx.dropped = True
+            elif event._type == ProxyEvent.REPLACE:
+                evctx.replace = event.content
+            elif event._type == ProxyEvent.INSERT_TO_CLIENT:
+                evctx.insertToClient += event.content
+            elif event._type == ProxyEvent.SEND_TO_CLIENT:
+                evctx.sendToClient += event.content
+            elif event._type == ProxyEvent.INSERT_TO_SERVER:
+                evctx.insertToServer += event.content
+            elif event._type == ProxyEvent.SEND_TO_SERVER:
+                evctx.sendToServer += event.content
+            else:
+                yield event
+
+    def client_message(self, flow_msg):
+        handler = self.terminal.client_message(flow_msg.content)
+        evctx = self.EventContext()
+        for event in self.terminal_events(handler, evctx):
+            print("from_client:", event)
+
+        if evctx.insertToClient or evctx.sendToClient:
+            ctx.master.sendToClient(self.flow, evctx.insertToClient + evctx.sendToClient)
+
+        if evctx.replace: flow_msg.content = replace
+
+        if evctx.insertToServer or evctx.sendToServer:
+            flow_msg.content = evctx.insertToServer + (flow_msg.content if not evctx.dropped else b'') + evctx.sendToServer
+            print("Replace client message!", len(flow_msg.content))
+        elif evctx.dropped:
+            print("Drop client message!")
+            flow_msg.drop()
+
+    def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext):
         event.clear()
 
-        if len(self.server_msgs):
-            pttTerm.pre_refresh()
-            pttTerm.feed(self.server_msgs)
-            pttTerm.post_refresh()
-            self.server_msgs = bytes()
+        handler = self.terminal.server_message(self.msg_to_terminal)
+        for event in self.terminal_events(handler, evctx):
+            print("from_server:", event)
 
-        if len(self.standby_msgs): event.set()
+        self.msg_to_terminal = b''
 
-    # send to the client
-    def purge_standby_message(self, flow: http.HTTPFlow):
-        if len(self.standby_msgs):
-            ctx.master.sendToClient(flow, self.standby_msgs)
-            self.standby_msgs = bytes()
+    def server_message(self, flow_msg):
+        evctx = self.EventContext()
 
-    def server_message(self, content):
-        self.server_msgs += content
+        firstSegment = not self.msg_to_terminal
+        lastSegment  = len(flow_msg.content) < 1021
 
-        if self.firstSegment: pttTerm.pre_update()
+        if firstSegment:
+            handler = self.terminal.pre_server_message()
+            for event in self.terminal_events(handler, evctx):
+                print("pre_server:", event)
 
-        n = len(content)
-#        print("\nserver: (%d)" % n)
+        self.msg_to_terminal += flow_msg.content
 
-        # dirty trick to identify the last segment with size
-        # (FIXME) Done: handled in server_msg_timeout()
-        # but sometimes a segment with size 1021 is not the last or the last segment is larger than 1021
-        # (FIXME) Done: queue message segments in server_msgs
-        # a double-byte character could be split into two segments
-        if self.lastSegment:
-            self.purge_server_message(self.server_event)
+        if lastSegment:
+            self.purge_terminal_message(self.server_event, evctx)
+
+            if evctx.sendToClient:
+                flow_msg.content += evctx.sendToClient
         else:
             self.server_event.set()
 
-    vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
-    xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
-    def client_message(self, content):
-        print("\nclient:", content)
+        if evctx.insertToServer or evctx.sendToServer:
+            ctx.master.sendToServer(self.flow, evctx.insertToServer + evctx.sendToServer)
 
-        if len(content) > 1 or not UserEvent.isViewable(content[0]):
-            # need to reset userEvent for unknown keys otherwise PttTerm.pre_refresh() would go wrong
-            pttTerm.userEvent(UserEvent.Unknown)
-
-        uncommitted = (len(content) > 1 and content[-1] == ord('\r'))
-
-        # VT100 escape
-        sESC = '\x1b'
-        sCSI = '['
-        sNUM = '0'
-
-        # Telnet escape
-        IAC = 0xff
-        SUB = 0xfa
-        NOP = 0xf1
-        SUBEND = 0xf0
-        WINSIZE = 0x1f
-
-        state = None
-        number = ""
-        n = 0
-        while n < len(content):
-            resp = None
-            b = content[n]
-
-            if state != sNUM: number = ""
-
-            c = chr(b)
-            if state == None:
-                cmdBegin = n
-                if c == sESC:
-                    state = sESC
-                elif c == '\b':
-                    resp = pttTerm.userEvent(UserEvent.Key_Backspace)
-                elif c == '\r':
-                    resp = pttTerm.userEvent(UserEvent.Key_Enter)
-                elif b == IAC:
-                    state = IAC
-                elif UserEvent.isViewable(b):
-                    resp = pttTerm.userEvent(b)
-            elif state == sESC:
-                if c == sCSI:
-                    state = sCSI
-                else:
-                    state = None
-            elif state == sCSI:
-                if 'A' <= c <= 'H':
-                    if c == 'A':
-                        resp = pttTerm.userEvent(UserEvent.Key_Up, uncommitted)
-                    elif c == 'B':
-                        resp = pttTerm.userEvent(UserEvent.Key_Down, uncommitted)
-                    elif c == 'C':
-                        resp = pttTerm.userEvent(UserEvent.Key_Right)
-                    elif c == 'D':
-                        resp = pttTerm.userEvent(UserEvent.Key_Left)
-                    elif c == 'F':
-                        resp = pttTerm.userEvent(UserEvent.Key_End)
-                    elif c == 'H':
-                        resp = pttTerm.userEvent(UserEvent.Key_Home)
-                    else:
-                        print("xterm key:", self.xterm_keys[b - ord('A')])
-                elif '0' <= c <= '9':
-                    state = sNUM
-                    number += c
-                    n += 1
-                    continue
-                state = None
-            elif state == sNUM:
-                if '0' <= c <= '9':
-                    number += c
-                    n += 1
-                    continue
-                elif c == '~':
-                    number = int(number)
-                    if number == 5:
-                        resp = pttTerm.userEvent(UserEvent.Key_PgUp)
-                    elif number == 6:
-                        resp = pttTerm.userEvent(UserEvent.Key_PgDn)
-                    elif number in [1, 7]:
-                        resp = pttTerm.userEvent(UserEvent.Key_Home)
-                    elif number in [4, 8]:
-                        resp = pttTerm.userEvent(UserEvent.Key_End)
-                    elif 1 <= number <= len(self.vt_keys):
-                        print("vt key:", self.vt_keys[number-1])
-                state = None
-            elif state == IAC:
-                if SUB <= b < IAC:
-                    state = SUB
-                elif b == SUBEND or b == NOP:
-                    state = None
-                else:
-                    break
-            elif state == SUB:
-                if b == WINSIZE:
-                    if n + 4 < len(content):
-                        width  = (content[n+1] << 8) | content[n+2]
-                        height = (content[n+3] << 8) | content[n+4]
-                        print("Window size", width, height)
-                        pttTerm.resize(width, height)
-                        n += 4
-                        state = None
-                    else:
-                        break
-                elif 0 <= b <= 3:
-                    state = None
-                else:
-                    break
-
-            if isinstance(resp, bytes):
-                # replace the current input with resp
-                content = content[:cmdBegin] + resp + content[n+1:]
-            elif resp is False:
-                return False
-
-            n += 1
-
-        return content
+        if firstSegment and evctx.insertToClient:
+            flow_msg.content = evctx.insertToClient + flow_msg.content
 
     async def server_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
         print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
+
         cancelled = False
         while (flow.websocket.timestamp_end is None) and not cancelled:
             try:
@@ -210,9 +122,7 @@ class PttProxy:
             except Exception:
                 traceback.print_exc()
 
-            self.purge_standby_message(flow)
-
-            rcv_len = len(self.server_msgs)
+            rcv_len = len(self.msg_to_terminal)
             if rcv_len == 0:
                 event.clear()
                 continue
@@ -228,31 +138,50 @@ class PttProxy:
                     traceback.print_exc()
 
                 # no more coming data
-                if len(self.server_msgs) <= rcv_len:
+                if len(self.msg_to_terminal) <= rcv_len:
                     break
 
             if cancelled: break
 
-            if len(self.server_msgs):
-                print("Server event timeout! Pending:", len(self.server_msgs))
-
-            self.purge_server_message(event)
+            if len(self.msg_to_terminal):
+                print("Server event timeout! Pending:", len(self.msg_to_terminal))
+                self.purge_terminal_message(event, self.EventContext())
+            else:
+                event.clear()
 
         print("server_msg_timeout() finished")
+
+    def handle_message(self, flow_msg):
+        if flow_msg.from_client:
+            self.client_message(flow_msg)
+        else:
+            self.server_message(flow_msg)
+
+
+class PttProxy:
+
+    def __init__(self):
+        self.reset()
+        self.wslayer = None
+        self.is_running = False
+        self.is_done = False
+
+        # only immutable attribute refers to new object by assignment but PttProxy.last_cmds is not
+        self.last_cmds = copy.copy(self.last_cmds)
+
+    def reset(self):
+        for flow in getattr(self, "pttFlows", {}).values():
+            flow.done()
+
+        self.pttFlows = {}
 
     # self-defined hooks
 
     def on_signal(self, signum: int):
         print("Addon got", signum, "(%d)" % int(signum))
-        print("server_msgs:", len(self.server_msgs))
-        if hasattr(self, "server_event"):
-            print("server_event:", self.server_event)
-        if hasattr(self, "server_task"):
-            print("server_task:", self.server_task)
-        pttTerm.showState()
 
-    cmd_formats = {'.':  "pttTerm.{data}",
-                   '?':  "print(pttTerm.{data})",
+    cmd_formats = {'.':  "list(self.pttFlows.values())[0].terminal.{data}",
+                   '?':  "print(list(self.pttFlows.values())[0].terminal.{data})",
                    '!':  "{data}",
                    '\\': "print({data})" }
 
@@ -304,32 +233,6 @@ class PttProxy:
 
     # reloading the addon script will not run the hook websocket_start()
     def websocket_start(self, flow: http.HTTPFlow):
-        class ProxyFlow:
-
-            @staticmethod
-            def sendToServer(data):
-                ctx.master.sendToServer(flow, data)
-
-            @staticmethod
-            def insertToClient(data):
-                if self.firstSegment:
-                    # insert ahead of the first segment
-                    print("Insert to client: ", len(data))
-                    self.current_message.content = data + self.current_message.content
-                else:
-                    self.standby_msgs += data
-                    print("Queued to insert: ", len(data))
-
-            @staticmethod
-            def sendToClient(data):
-                if self.lastSegment:
-                    # piggyback to the last segment
-                    print("Piggyback to client: ", len(data))
-                    self.current_message.content += data
-                else:
-                    self.standby_msgs += data
-                    print("Queued to send: ", len(data))
-
         print("websocket_start")
         wslayer = getattr(self, "wslayer", None)
         httplayer = getattr(self, "httplayer", None)
@@ -344,13 +247,14 @@ class PttProxy:
             print(wslayer)
             ctx.master.websocketLayerStarted(wslayer)
 
-        if not hasattr(self, "server_event"):
-            self.server_event = asyncio.Event()
-            self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
-        pttTerm.flowStarted(ProxyFlow, self.read_flow)
+        self.pttFlows[flow] = PttFlow(flow)
 
     def websocket_end(self, flow: http.HTTPFlow):
         print("websocket_end")
+
+        self.pttFlows[flow].done()
+        del self.pttFlows[flow]
+
         if getattr(self, "wslayer", None):
             ctx.master.websocketLayerEnded(self.wslayer)
             self.httplayer = None
@@ -368,54 +272,10 @@ class PttProxy:
         flow_msg = flow.websocket.messages[-1]
         if ctx.master.is_self_injected(flow_msg): return
 
-        if flow_msg.from_client:
-            self.firstSegment = False
-            self.lastSegment  = False
+        self.pttFlows[flow].handle_message(flow_msg)
 
-            self.purge_standby_message(flow)
-            self.purge_server_message(self.server_event)
-
-            resp = self.client_message(flow_msg.content)
-            if isinstance(resp, bytes):
-                if resp != flow_msg.content: print("replace client message:", resp)
-                flow_msg.content = resp
-            else:
-                print("Drop client message!")
-                flow_msg.drop()
-        else:
-            self.firstSegment = not self.server_event.is_set() # (len(flow.websocket.messages) == 1 or flow.websocket.messages[-2].from_client)
-            self.lastSegment  = (len(flow_msg.content) < 1021) # see the comment in server_message() for why it's 1021
-            self.current_message = flow_msg
-
-            original_content = flow_msg.content
-
-            self.server_message(flow_msg.content)
-
-            if self.current_message.content is not original_content:
-                print("server -> client, changed:", len(self.current_message.content))
-
-            del self.current_message
-            self.firstSegment = False
-            self.lastSegment  = False
-
-    def websocket_handshake(self, flow: http.HTTPFlow):
-        """
-            Called when a client wants to establish a WebSocket connection. The
-            WebSocket-specific headers can be manipulated to alter the
-            handshake. The flow object is guaranteed to have a non-None request
-            attribute.
-        """
-        print("websocket_handshake")
-
-    def websocket_error(self, flow: http.HTTPFlow):
-        """
-            A websocket connection has had an error.
-        """
-        print("websocket_error", flow)
-
-def reload(oldproxy, oldterm):
+def reload(oldproxy):
     from mitmproxy.addonmanager import Loader
-    pttTerm.reload(oldterm)
 
     addons[0].load(Loader(ctx.master))
     addons[0].configure({'termlog_verbosity', 'flow_detail'})
@@ -427,8 +287,6 @@ def reload(oldproxy, oldterm):
 
     if addons[0].wslayer:
         addons[0].websocket_start(addons[0].wslayer.flow)
-        # only valid in inPanel state
-        pttTerm.post_refresh()
 
     addons[0].running()
 

@@ -1,3 +1,25 @@
+from dataclasses import dataclass
+
+@dataclass
+class ProxyEvent:
+    TEST = 0
+    DROP = 1
+    REPLACE = 2
+    INSERT_TO_CLIENT = 11
+    SEND_TO_CLIENT   = 12
+    INSERT_TO_SERVER = 13
+    SEND_TO_SERVER   = 14
+
+    IN_BOARD  = 20
+    OUT_BOARD = 21
+    IN_THREAD  = 30
+    OUT_THREAD = 31
+    RETURN = 40
+    SWITCH = 41
+
+    _type: int
+    content: bytes = None
+
 class UserEvent:
     Unknown = 0
 
@@ -10,7 +32,9 @@ class UserEvent:
     # 32 ~ 126 is the same viewable ASCII code
     Key_Space = ord(' ')
     Q = ord('Q')
+    h = ord('h')
     r = ord('r')
+    s = ord('s')
 
     Key_Up    = 0x101
     Key_Down  = 0x102

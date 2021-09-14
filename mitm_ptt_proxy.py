@@ -209,12 +209,11 @@ class myDumpMaster(DumpMaster):
         self.addons.remove(self.ptt_proxy)
 
         oldproxy = self.ptt_proxy.addons[0]
-        oldterm = self.ptt_proxy.pttTerm
 
         self.ptt_proxy = reload(ptt_proxy)
 
         self.addons.add(self.ptt_proxy)     # invoke LoadHook
-        self.ptt_proxy.reload(oldproxy, oldterm)
+        self.ptt_proxy.reload(oldproxy)
 
     async def conn_watcher(self):
         from mitmproxy.proxy.server import TimeoutWatchdog
