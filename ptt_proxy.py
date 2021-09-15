@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from mitmproxy import http, ctx
 from mitmproxy.proxy import layer, layers
 
-from user_event import ProxyEvent
+from ptt_event import ProxyEvent
 from ptt_terminal import PttTerminal
 
 
@@ -18,7 +18,7 @@ class PttFlow:
 
     def __init__(self, flow):
         self.flow = flow
-        self.terminal = PttTerminal(128, 32, self)
+        self.terminal = PttTerminal(128, 32)
         self.msg_to_terminal = b''
 
         self.server_event = asyncio.Event()
@@ -40,9 +40,9 @@ class PttFlow:
 
     def terminal_events(self, handler, evctx: EventContext):
         for event in handler:
-            if event._type == ProxyEvent.DROP:
+            if event._type == ProxyEvent.DROP_CONTENT:
                 evctx.dropped = True
-            elif event._type == ProxyEvent.REPLACE:
+            elif event._type == ProxyEvent.REPLACE_CONTENT:
                 evctx.replace = event.content
             elif event._type == ProxyEvent.INSERT_TO_CLIENT:
                 evctx.insertToClient += event.content
@@ -59,7 +59,7 @@ class PttFlow:
         handler = self.terminal.client_message(flow_msg.content)
         evctx = self.EventContext()
         for event in self.terminal_events(handler, evctx):
-            print("from_client:", event)
+            print("proxy.terminal.client:", event)
 
         if evctx.insertToClient or evctx.sendToClient:
             ctx.master.sendToClient(self.flow, evctx.insertToClient + evctx.sendToClient)
@@ -78,7 +78,7 @@ class PttFlow:
 
         handler = self.terminal.server_message(self.msg_to_terminal)
         for event in self.terminal_events(handler, evctx):
-            print("from_server:", event)
+            print("proxy.terminal.server:", event)
 
         self.msg_to_terminal = b''
 
@@ -91,7 +91,7 @@ class PttFlow:
         if firstSegment:
             handler = self.terminal.pre_server_message()
             for event in self.terminal_events(handler, evctx):
-                print("pre_server:", event)
+                print("proxy.terminal.pre_server:", event)
 
         self.msg_to_terminal += flow_msg.content
 

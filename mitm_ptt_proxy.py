@@ -204,6 +204,27 @@ class myDumpMaster(DumpMaster):
         yield from self.wsl_relay_messages(event)
 
     def reload_ptt_proxy(self):
+        def delete_module(name):
+            try:
+                del sys.modules[name]
+                print("removed module:", name)
+            except Exception:
+                pass
+
+        delete_module('ptt_terminal')
+        delete_module('ptt_board')
+        delete_module('ptt_thread')
+        delete_module('ptt_menu')
+        delete_module('ptt_event')
+
+        import glob
+        for f in glob.glob("__pycache__/*"):
+            try:
+                os.remove(f)
+                print("removed file:", f)
+            except Exception:
+                pass
+
         from importlib import reload
 
         self.addons.remove(self.ptt_proxy)

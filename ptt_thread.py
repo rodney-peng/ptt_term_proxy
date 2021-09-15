@@ -6,18 +6,67 @@ import traceback
 from uao import register_uao
 register_uao()
 
-from user_event import UserEvent
+from ptt_event import ClientEvent, ProxyEvent
+from ptt_menu import PttListMenu, SearchBoard, HelpScreen
+
+from ptt_event import UserEvent
 
 # a PTT thread being viewed
-class PttThread:
+class PttThread(PttListMenu):
 
-    def __init__(self, filename=None):
-        self.clear()
-        self.persistent = True
+    def __init__(self, board, key):
+        self.board = board
+        self.key = key
+        super().__init__()
 
-        if filename and self.loadContent(filename):
-            self.scanURL()
-            print("read from ", filename, "lines", self.lastLine, "url:", self.url)
+    def reset(self):
+        super().reset()
+
+        threadid = re.match("([0-9\s]{6})", self.key)
+        threadid = threadid.group(1) if threadid else self.key[-20:]
+        self._prefix = f"{self.board.name}/{threadid}"
+
+        self.subMenu = None
+
+    @classmethod
+    def is_entered(cls, lines):
+        return re.match("\s*瀏覽.+離開\s*$", lines[-1])
+
+    def pre_update_submenu(self, y, x, line):
+        if not self.subMenu: return
+        yield from self.subMenu.pre_update(y, x, line)
+
+    def post_update_submenu(self, y, x, lines):
+        if not self.subMenu: return
+
+        quitMenu = False
+        for event in self.subMenu.post_update(y, x, lines):
+            if event._type == ProxyEvent.RETURN:
+                quitMenu = True
+            else:
+                yield event
+
+        if quitMenu:
+            self.subMenu = None
+        else:
+            yield ProxyEvent(ProxyEvent.DONE)
+
+        if False: yield
+
+    subMenus = { ClientEvent.s: SearchBoard, ClientEvent.h: HelpScreen }
+
+    def post_update_self(self, y, x, lines):
+        if self.clientEvent in self.subMenus:
+            menu = self.subMenus[self.clientEvent]
+            if menu.is_entered(lines):
+                self.subMenu = menu()
+                yield from self.subMenu.enter()
+                return
+        elif self.clientEvent in [ClientEvent.q, ClientEvent.Key_Left] and \
+             not self.is_entered(lines):
+            yield from self.leave()
+
+        if False: yield
 
     def clear(self):
         self.lines = []
@@ -405,4 +454,9 @@ class PttThreadPersist(PttThread):
         self.lastViewed = thread.lastViewed
         self.elapsedTime += thread.elapsedTime
 
+if __name__ == "__main__":
+    from ptt_board import PttBoard
+    thread = PttThread(PttBoard("Test"), "123456")
+    for event in thread.client_event(ClientEvent.Key_Space):
+        print(event)
 

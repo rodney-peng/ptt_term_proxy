@@ -3,19 +3,26 @@ from dataclasses import dataclass
 @dataclass
 class ProxyEvent:
     TEST = 0
-    DROP = 1
-    REPLACE = 2
-    INSERT_TO_CLIENT = 11
-    SEND_TO_CLIENT   = 12
-    INSERT_TO_SERVER = 13
-    SEND_TO_SERVER   = 14
+    DONE = 1
 
-    IN_BOARD  = 20
-    OUT_BOARD = 21
-    IN_THREAD  = 30
-    OUT_THREAD = 31
-    RETURN = 40
-    SWITCH = 41
+    # for message content
+    DROP_CONTENT = 10
+    REPLACE_CONTENT = 11
+    INSERT_TO_CLIENT = 12
+    SEND_TO_CLIENT   = 13
+    INSERT_TO_SERVER = 14
+    SEND_TO_SERVER   = 15
+
+    TERMINAL_START = 100
+
+    IN_BOARD  = 100
+    OUT_BOARD = 101
+
+    IN_THREAD  = 200
+    OUT_THREAD = 201
+
+    RETURN = 300
+    SWITCH = 301
 
     _type: int
     content: bytes = None
@@ -33,6 +40,7 @@ class UserEvent:
     Key_Space = ord(' ')
     Q = ord('Q')
     h = ord('h')
+    q = ord('q')
     r = ord('r')
     s = ord('s')
 
@@ -59,4 +67,5 @@ class UserEvent:
         else:
             return event.to_bytes(1, 'big')
 
+ClientEvent = UserEvent
 
