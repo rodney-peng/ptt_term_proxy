@@ -2,10 +2,10 @@ from dataclasses import dataclass
 
 @dataclass
 class ProxyEvent:
-    TEST = 0
-    DONE = 1
+    FALSE = 0
+    TRUE  = 1
 
-    # for message content
+    # message content events
     DROP_CONTENT = 10
     REPLACE_CONTENT = 11
     INSERT_TO_CLIENT = 12
@@ -13,33 +13,67 @@ class ProxyEvent:
     INSERT_TO_SERVER = 14
     SEND_TO_SERVER   = 15
 
+    # terminal events
     TERMINAL_START = 100
-
-    IN_BOARD  = 100
-    OUT_BOARD = 101
-
-    IN_THREAD  = 200
-    OUT_THREAD = 201
-
-    RETURN = 300
-    SWITCH = 301
+    DONE  = 101
+    RETURN = 102
+    BOARD_NAME = 103
+    THREAD_URL = 104
 
     _type: int
     content: bytes = None
+
+    @classmethod
+    def as_bool(cls, value: bool):
+        return cls(cls.TRUE if value else cls.FALSE)
+
+    @classmethod
+    def eval_bool(cls, handler):
+        result = None
+        for event in handler:
+            if event is True or event is False:
+                result = event
+            elif event._type == cls.TRUE:
+                result = True
+            elif event._type == cls.FALSE:
+                result = False
+        return result
+
+    @classmethod
+    def eval_type(cls, handler, _type):
+        result = None
+        for event in handler:
+            if event._type == _type:
+                result = event.content
+        return result
+
 
 class UserEvent:
     Unknown = 0
 
     Ctrl_B = 2
     Ctrl_F = 6
+    Ctrl_Z = 0x1a
 
     Key_Backspace = ord('\b')
     Key_Enter = ord('\r')
 
     # 32 ~ 126 is the same viewable ASCII code
     Key_Space = ord(' ')
+    Key0 = ord('0')
+    Key1 = ord('1')
+    Key2 = ord('2')
+    Key3 = ord('3')
+    Key4 = ord('4')
+    Key5 = ord('5')
+    Key6 = ord('6')
+    Key7 = ord('7')
+    Key8 = ord('8')
+    Key9 = ord('9')
     Q = ord('Q')
     h = ord('h')
+    l = ord('l')
+    o = ord('o')
     q = ord('q')
     r = ord('r')
     s = ord('s')

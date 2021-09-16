@@ -6,6 +6,7 @@ import asyncio
 import time
 import socket
 import traceback
+import inspect
 
 from uao import register_uao
 register_uao()
@@ -73,7 +74,7 @@ class PttTerminal:
 
     def cursor(self, strip=True):
         line = self.screen.display[self.screen.cursor.y]
-        return (self.screen.cursor.y + 1, self.screen.cursor.x + 1,
+        return (self.screen.cursor.y, self.screen.cursor.x,
                 # rstrip() only, preserves leading spaces (and cursor)
                 line.rstrip() if strip else line)
 
@@ -85,7 +86,7 @@ class PttTerminal:
         else:
             print("lines: %d" % self.screen.lines)
 
-    # messages from proxy and event generators
+    # messages from proxy
 
     vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
     xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
@@ -112,7 +113,7 @@ class PttTerminal:
         replace = b''
         replaced = False
         while n < len(content):
-            resp = None
+            handler = None
             b = content[n]
 
             if state != sNUM: number = ""
@@ -122,14 +123,10 @@ class PttTerminal:
                 cmdBegin = n
                 if c == sESC:
                     state = sESC
-                elif c == '\b':
-                    resp = self.client_event(ClientEvent.Key_Backspace)
-                elif c == '\r':
-                    resp = self.client_event(ClientEvent.Key_Enter)
                 elif b == IAC:
                     state = IAC
-                elif ClientEvent.isViewable(b):
-                    resp = self.client_event(b)
+                else:
+                    handler = self.client_event(b)
             elif state == sESC:
                 if c == sCSI:
                     state = sCSI
@@ -138,17 +135,17 @@ class PttTerminal:
             elif state == sCSI:
                 if 'A' <= c <= 'H':
                     if c == 'A':
-                        resp = self.client_event(ClientEvent.Key_Up, uncommitted)
+                        handler = self.client_event(ClientEvent.Key_Up, uncommitted)
                     elif c == 'B':
-                        resp = self.client_event(ClientEvent.Key_Down, uncommitted)
+                        handler = self.client_event(ClientEvent.Key_Down, uncommitted)
                     elif c == 'C':
-                        resp = self.client_event(ClientEvent.Key_Right)
+                        handler = self.client_event(ClientEvent.Key_Right)
                     elif c == 'D':
-                        resp = self.client_event(ClientEvent.Key_Left)
+                        handler = self.client_event(ClientEvent.Key_Left)
                     elif c == 'F':
-                        resp = self.client_event(ClientEvent.Key_End)
+                        handler = self.client_event(ClientEvent.Key_End)
                     elif c == 'H':
-                        resp = self.client_event(ClientEvent.Key_Home)
+                        handler = self.client_event(ClientEvent.Key_Home)
                     else:
                         print("xterm key:", self.xterm_keys[b - ord('A')])
                 elif '0' <= c <= '9':
@@ -165,13 +162,13 @@ class PttTerminal:
                 elif c == '~':
                     number = int(number)
                     if number == 5:
-                        resp = self.client_event(ClientEvent.Key_PgUp)
+                        handler = self.client_event(ClientEvent.Key_PgUp)
                     elif number == 6:
-                        resp = self.client_event(ClientEvent.Key_PgDn)
+                        handler = self.client_event(ClientEvent.Key_PgDn)
                     elif number in [1, 7]:
-                        resp = self.client_event(ClientEvent.Key_Home)
+                        handler = self.client_event(ClientEvent.Key_Home)
                     elif number in [4, 8]:
-                        resp = self.client_event(ClientEvent.Key_End)
+                        handler = self.client_event(ClientEvent.Key_End)
                     elif 1 <= number <= len(self.vt_keys):
                         print("vt key:", self.vt_keys[number-1])
                 state = None
@@ -198,29 +195,33 @@ class PttTerminal:
                 else:
                     break
 
-            if resp:    # a generator
-                yield from resp
-
-            '''
-            if isinstance(resp, bytes):
-                # replace the current input with resp
-                if not replaced: replace = content[:cmdBegin]
-                replace += resp
-                replaced = True
-            elif resp is False:
-                # drop current input
-                if not replaced: replace = content[:cmdBegin]
-                replaced = True
+            if handler:    # a generator
+                assert inspect.isgenerator(handler)
+                for event in handler:
+                    if event._type == ProxyEvent.DROP_CONTENT:
+                        # drop the current input
+                        if not replaced: replace = content[:cmdBegin]
+                        replaced = True
+                    elif event._type == ProxyEvent.REPLACE_CONTENT:
+                        # replace the current input
+                        if not replaced: replace = content[:cmdBegin]
+                        replace += event.content
+                        replaced = True
+                    elif event._type < ProxyEvent.TERMINAL_START:
+                        yield event
+                    else:
+                        print("terminal.client:", event)
             elif replaced and state == None:
                 replace += content[cmdBegin:n+1]
-            '''
 
             n += 1
 
-        if replaced: yield ProxyEvent(ProxyEvent.REPLACE_CONTENT, replace)
+        if replaced:
+            if replace:
+                yield ProxyEvent(ProxyEvent.REPLACE_CONTENT, replace)
+            else:
+                yield ProxyEvent(ProxyEvent.DROP_CONTENT)
 
-    # the client message will be dropped if false is returned
-    # the current user event will be replaced if a bytes object is returned
     def client_event(self, event: ClientEvent, uncommitted = False):
         if uncommitted:
             if event == ClientEvent.Key_Up:
@@ -230,16 +231,17 @@ class PttTerminal:
 
         if self.board:
             yield from self.board.client_event(event)
-            return
+        else:
+            print("client event:", ClientEvent.name(event))
+            self.clientEvent = event
 
-        print("User event:", ClientEvent.name(event))
-        self.clientEvent = event
         if False: yield
 
     def pre_server_message(self):
         if self.board:
             y, x, line = self.cursor()
-            for event in self.board.pre_update(y, x, line):
+            lines = self.screen.display
+            for event in self.board.pre_update(y, x, lines):
                 if event._type < ProxyEvent.TERMINAL_START:
                     yield event
                 else:
@@ -252,8 +254,8 @@ class PttTerminal:
         lines = self.screen.display
         if self.board:
             for event in self.board.post_update(y, x, lines):
-                if event._type in [ProxyEvent.OUT_BOARD, ProxyEvent.RETURN, ProxyEvent.SWITCH]:
-                    print("terminal: left", self.board.name)
+                if event._type == ProxyEvent.RETURN:
+                    print("terminal: exit", self.board.name)
                     self.board = None
                 elif event._type < ProxyEvent.TERMINAL_START:
                     yield event
@@ -261,12 +263,12 @@ class PttTerminal:
                     print("terminal.post_server:", event)
             if self.board: return
 
-        if PttBoard.is_entered(lines):
-            board = PttBoard.boardName(lines)
+        board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
+        if board:
             if board not in self.boards:
                 self.boards[board] = PttBoard(board)
             self.board = self.boards[board]
-            for event in self.board.enter():
+            for event in self.board.enter(y, x, lines):
                 if event._type < ProxyEvent.TERMINAL_START:
                     yield event
 

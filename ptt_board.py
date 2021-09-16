@@ -1,10 +1,25 @@
 import re
 
 from ptt_event import ProxyEvent, ClientEvent
-from ptt_menu import PttListMenu, SearchBoard, HelpScreen
+from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
 from ptt_thread import PttThread
 
-class PttBoard(PttListMenu):
+
+class QuickSwitch(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[-1].startswith(" ★快速切換:"))
+
+
+class JumpToEntry(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[-1].startswith(" 跳至第幾項:"))
+
+
+class PttBoard(PttMenu):
 
     def __init__(self, name):
         self.name = name
@@ -13,81 +28,95 @@ class PttBoard(PttListMenu):
     def reset(self):
         super().reset()
         self._prefix = self.name
-
         self.threads = {}
-        self.subMenu = None
 
-    @classmethod
-    def is_entered(cls, lines, board=None):
+    @staticmethod
+    def is_entered(lines, board=None):
         # In '系列' only displays the first thread for a series
         title = re.match("\s*【*(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》\s*$", lines[0])
         if title and re.match("\s*文章選讀", lines[-1]):
-            return (board == title.group(3)) if board else True
-        return False
-
-    @classmethod
-    def boardName(cls, lines):
-        return re.match("\s*【*(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》\s*$", lines[0]).group(3)
-
-    def thread(self, line):
-        prefix = 7
-        stats  = 5
-        if '★' in line[:6]: prefix -= 1
-        if '爆' in line[prefix:prefix+4]: stats -= 1
-        thread_key = line[1:prefix] + line[prefix+stats:]
-        print(f"thread = '{thread_key}'")
-        if thread_key not in self.threads:
-            self.threads[thread_key] = PttThread(self, thread_key)
-        return self.threads[thread_key]
-
-    def pre_update_submenu(self, y, x, line):
-        if not self.subMenu: return
-        yield from self.subMenu.pre_update(y, x, line)
-
-    def pre_update_self(self, y, x, line):
-        self.cursorLine = line
-        if False: yield
-
-    def post_update_submenu(self, y, x, lines):
-        if not self.subMenu: return
-
-        quitMenu = False
-        for event in self.subMenu.post_update(y, x, lines):
-            if event._type == ProxyEvent.RETURN:
-                quitMenu = True
-            elif event._type == ProxyEvent.SWITCH:
-                quitMenu = True
-                yield event
-            else:
-                yield event
-
-        if quitMenu:
-            self.subMenu = None
+            yield ProxyEvent(ProxyEvent.BOARD_NAME, title.group(3))
+            yield ProxyEvent.as_bool((board == title.group(3)) if board else True)
         else:
-            yield ProxyEvent(ProxyEvent.DONE)
+            yield ProxyEvent.as_bool(False)
 
+    def enter(self, y, x, lines):
+        yield from super().enter(y, x, lines)
+        print(self.prefix(), lines[y])
+
+    def makeThread(self, line):
+        if '★' in line[:6]:
+            prefix = "******"
+            line = line[6:]
+        else:
+            prefix = line[1:7]
+            line = line[7:]
+
+        if '爆' in line[:4]:
+            line = line[3:]
+        else:
+            line = line[4:]
+
+        key = prefix + line.rstrip()
+        print(f"thread = '{key}'")
+        if key not in self.threads:
+            self.threads[key] = PttThread(self, key)
+        return self.threads[key]
+
+    def pre_update_self(self, y, x, lines):
+        self.cursorLine = lines[y]
+        yield from super().pre_update_self(y, x, lines)
+
+    subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
+                 ClientEvent.s: SearchBoard,
+                 ClientEvent.h: HelpScreen,
+                 ClientEvent.Q: ThreadInfo,
+                 ClientEvent.Key_Enter: PttThread,
+                 ClientEvent.Key_Right: PttThread,
+                 ClientEvent.l:         PttThread,
+                 ClientEvent.r:         PttThread,
+                 ClientEvent.Key0: JumpToEntry,
+                 ClientEvent.Key1: JumpToEntry,
+                 ClientEvent.Key2: JumpToEntry,
+                 ClientEvent.Key3: JumpToEntry,
+                 ClientEvent.Key4: JumpToEntry,
+                 ClientEvent.Key5: JumpToEntry,
+                 ClientEvent.Key6: JumpToEntry,
+                 ClientEvent.Key7: JumpToEntry,
+                 ClientEvent.Key8: JumpToEntry,
+                 ClientEvent.Key9: JumpToEntry }
+
+    def isSubMenuEntered(self, menu, lines):
+        if menu is ThreadInfo:
+            url = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.THREAD_URL)
+            if url: self.makeThread(self.cursorLine).setURL(url)
+            print(self.prefix(), "URL:", url)
+            return url is not None
+        else:
+            return super().isSubMenuEntered(menu, lines)
+
+    def makeSubMenu(self, menu):
+        if menu is PttThread:
+            return self.makeThread(self.cursorLine)
+        else:
+            return super().makeSubMenu(menu)
+
+    def post_update_is_self(self, y, x, lines):
+        if not ProxyEvent.eval_bool(self.is_entered(lines, self.name)):
+            yield from self.exit()
+
+    def post_update_self(self, returnFromSubMenu, y, x, lines):
+        if returnFromSubMenu or self.is_cursor_moved():
+            print(self.prefix(), lines[y])
         if False: yield
 
-    subMenus = { ClientEvent.s: SearchBoard, ClientEvent.h: HelpScreen,
-                 ClientEvent.Key_Enter: PttThread, ClientEvent.Key_Right: PttThread, ClientEvent.r: PttThread }
-
-    def post_update_self(self, y, x, lines):
-        if self.clientEvent in self.subMenus:
-            menu = self.subMenus[self.clientEvent]
-            if menu.is_entered(lines):
-                if menu is PttThread:
-                    self.subMenu = self.thread(self.cursorLine)
-                else:
-                    self.subMenu = menu()
-                yield from self.subMenu.enter()
-                return
-        elif self.clientEvent in [ClientEvent.q, ClientEvent.Key_Left] and \
-             not self.is_entered(lines, self.name):
-            yield ProxyEvent(ProxyEvent.OUT_BOARD, self.name)
-
+    def is_cursor_moved(self):
+        print(self.prefix(), "is_cursor_moved", ClientEvent.name(self.clientEvent))
+        return self.clientEvent in [ClientEvent.Key_Up, ClientEvent.Key_Down, ClientEvent.Key_PgUp, ClientEvent.Key_PgDn,
+                                    ClientEvent.Key_Home, ClientEvent.Key_End, ClientEvent.Ctrl_B, ClientEvent.Ctrl_F] or \
+               chr(self.clientEvent) in "pknjPN$=[]<>-+S{}"
 
 if __name__ == "__main__":
-    board = PttBoard("Test")
-    for event in board.client_event(ClientEvent.Key_Space):
-        print(event)
+    from ptt_menu import test
+    test(PttBoard("Test"))
 

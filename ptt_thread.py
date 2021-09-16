@@ -7,12 +7,18 @@ from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent
-from ptt_menu import PttListMenu, SearchBoard, HelpScreen
+from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
 
-from ptt_event import UserEvent
+
+class ThreadOption(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool("設定選項" in lines[-9] and "請調整設定" in lines[-1])
+
 
 # a PTT thread being viewed
-class PttThread(PttListMenu):
+class PttThread(PttMenu):
 
     def __init__(self, board, key):
         self.board = board
@@ -22,51 +28,54 @@ class PttThread(PttListMenu):
     def reset(self):
         super().reset()
 
+        # if the key doesn't start with 6 numbers and spaces, use the title string excluding the type like "[公告] "
         threadid = re.match("([0-9\s]{6})", self.key)
-        threadid = threadid.group(1) if threadid else self.key[-20:]
+        threadid = threadid.group(1) if threadid else self.key[27+5:][:10]
         self._prefix = f"{self.board.name}/{threadid}"
 
-        self.subMenu = None
+        self.lines = []
+        self.floors = []
 
-    @classmethod
-    def is_entered(cls, lines):
-        return re.match("\s*瀏覽.+離開\s*$", lines[-1])
+        self.url = None
+        self.urlLine = 0
 
-    def pre_update_submenu(self, y, x, line):
-        if not self.subMenu: return
-        yield from self.subMenu.pre_update(y, x, line)
+    def setURL(self, url: str):
+        if url != self.url:
+            self.url = url
+            self.urlLine = 0
 
-    def post_update_submenu(self, y, x, lines):
-        if not self.subMenu: return
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(re.match("\s*瀏覽", lines[-1]) and re.search("\(←\)離開\s*$", lines[-1]))
 
-        quitMenu = False
-        for event in self.subMenu.post_update(y, x, lines):
-            if event._type == ProxyEvent.RETURN:
-                quitMenu = True
-            else:
-                yield event
+    def enter(self, y, x, lines):
+        yield from super().enter(y, x, lines)
+        if self.url: print(self.prefix(), "has URL", self.url)
 
-        if quitMenu:
-            self.subMenu = None
+    subMenus = { ClientEvent.s: SearchBoard,
+                 ClientEvent.h: HelpScreen,
+                 ClientEvent.o: ThreadOption,
+                 ClientEvent.Q: ThreadInfo }
+
+    def isSubMenuEntered(self, menu, lines):
+        # once in ThreadInfo, it exits to the board rather than the thread
+        # so it's useless to get the URL?
+        if menu is ThreadInfo and self.url is None:
+            self.url = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.THREAD_URL)
+            print(self.prefix(), "URL:", self.url)
+            return self.url is not None
         else:
-            yield ProxyEvent(ProxyEvent.DONE)
+            return super().isSubMenuEntered(menu, lines)
 
+    def post_update_self(self, returnFromSubMenu, y, x, lines):
+        yield from self.view(lines)
+
+    def view(self, lines):
         if False: yield
 
-    subMenus = { ClientEvent.s: SearchBoard, ClientEvent.h: HelpScreen }
+    # =================================
 
-    def post_update_self(self, y, x, lines):
-        if self.clientEvent in self.subMenus:
-            menu = self.subMenus[self.clientEvent]
-            if menu.is_entered(lines):
-                self.subMenu = menu()
-                yield from self.subMenu.enter()
-                return
-        elif self.clientEvent in [ClientEvent.q, ClientEvent.Key_Left] and \
-             not self.is_entered(lines):
-            yield from self.leave()
-
-        if False: yield
+    from ptt_event import UserEvent
 
     def clear(self):
         self.lines = []
@@ -130,13 +139,7 @@ class PttThread(PttListMenu):
         except Exception as e:
             traceback.print_exc()
 
-    def setURL(self, url: str):
-        if url != self.url:
-            self.url = url
-            self.urlLine = 0
-            self.scanURL()
-
-    def view(self, lines, first: int, last: int, atEnd: bool):
+    def view_(self, lines, first: int, last: int, atEnd: bool):
         assert 0 < first <= last
         assert last - first + 1 <= len(lines)
 
@@ -456,7 +459,6 @@ class PttThreadPersist(PttThread):
 
 if __name__ == "__main__":
     from ptt_board import PttBoard
-    thread = PttThread(PttBoard("Test"), "123456")
-    for event in thread.client_event(ClientEvent.Key_Space):
-        print(event)
+    from ptt_menu import test
+    test(PttThread(PttBoard("Test"), "123456"))
 
