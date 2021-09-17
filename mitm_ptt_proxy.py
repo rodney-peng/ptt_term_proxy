@@ -120,7 +120,7 @@ class myDumpMaster(DumpMaster):
         if not isinstance(flow, http.HTTPFlow) or not flow.websocket:
             self.log.warn("Cannot inject WebSocket messages into non-WebSocket flows.")
 
-        print("self-injected, to_client:", to_client, len(message))
+#        print("self-injected, to_client:", to_client, len(message))
         msg = webSocketMessage(
             Opcode.TEXT if is_text else Opcode.BINARY,
             not to_client,
@@ -138,7 +138,8 @@ class myDumpMaster(DumpMaster):
         print("sendToServer:", data)
         to_client = False
         is_text = False
-        self.proxyserver.inject_websocket(flow, to_client, data, is_text)
+        self.inject_websocket(flow, to_client, data, is_text)
+        #self.proxyserver.inject_websocket(flow, to_client, data, is_text)
         #self.commands.call("inject.websocket", flow, to_client, data, is_text)
 
     def sendToClient(self, flow, data):
@@ -153,7 +154,7 @@ class myDumpMaster(DumpMaster):
         marklen = len(self.injected_mark)
         if len(flow_msg.content) > marklen and flow_msg.content[:marklen] == self.injected_mark:
             flow_msg.content = flow_msg.content[marklen:]
-            print("self-injected, from_client:", flow_msg.from_client, len(flow_msg.content), flow_msg.timestamp)
+#            print("self-injected, from_client:", flow_msg.from_client, len(flow_msg.content), flow_msg.timestamp)
             return True
         return False
 

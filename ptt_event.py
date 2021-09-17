@@ -1,82 +1,17 @@
 from dataclasses import dataclass
 
-@dataclass
-class ProxyEvent:
-    FALSE = 0
-    TRUE  = 1
-
-    # message content events
-    DROP_CONTENT = 10
-    REPLACE_CONTENT = 11
-    INSERT_TO_CLIENT = 12
-    SEND_TO_CLIENT   = 13
-    INSERT_TO_SERVER = 14
-    SEND_TO_SERVER   = 15
-
-    # terminal events
-    TERMINAL_START = 100
-    DONE  = 101
-    RETURN = 102
-    BOARD_NAME = 103
-    THREAD_URL = 104
-
-    _type: int
-    content: bytes = None
-
-    @classmethod
-    def as_bool(cls, value: bool):
-        return cls(cls.TRUE if value else cls.FALSE)
-
-    @classmethod
-    def eval_bool(cls, handler):
-        result = None
-        for event in handler:
-            if event is True or event is False:
-                result = event
-            elif event._type == cls.TRUE:
-                result = True
-            elif event._type == cls.FALSE:
-                result = False
-        return result
-
-    @classmethod
-    def eval_type(cls, handler, _type):
-        result = None
-        for event in handler:
-            if event._type == _type:
-                result = event.content
-        return result
-
 
 class UserEvent:
     Unknown = 0
 
-    Ctrl_B = 2
-    Ctrl_F = 6
-    Ctrl_Z = 0x1a
-
-    Key_Backspace = ord('\b')
-    Key_Enter = ord('\r')
+    Backspace = ord('\b')
+    Enter = ord('\r')
+    Tab = ord('\t')
 
     # 32 ~ 126 is the same viewable ASCII code
-    Key_Space = ord(' ')
-    Key0 = ord('0')
-    Key1 = ord('1')
-    Key2 = ord('2')
-    Key3 = ord('3')
-    Key4 = ord('4')
-    Key5 = ord('5')
-    Key6 = ord('6')
-    Key7 = ord('7')
-    Key8 = ord('8')
-    Key9 = ord('9')
-    Q = ord('Q')
-    h = ord('h')
-    l = ord('l')
-    o = ord('o')
-    q = ord('q')
-    r = ord('r')
-    s = ord('s')
+    Space  = ord(' ')
+    Colon  = ord(':')
+    SemiColon = ord(';')
 
     Key_Up    = 0x101
     Key_Down  = 0x102
@@ -99,7 +34,128 @@ class UserEvent:
         elif cls.Key_Up <= event <= cls.Key_End:
             return ["Up", "Down", "Right", "Left", "PgUp", "PgDn", "Home", "End"][event - cls.Key_Up]
         else:
-            return event.to_bytes(1, 'big')
+            return cls.to_bytes(event)
+
+    @staticmethod
+    def to_bytes(event: int):
+        return event.to_bytes(1, 'big')
+
+# Ctrl_A ~ Ctrl_Z
+for a in range(1, 0x1a+1):
+    setattr(UserEvent, 'Ctrl_'+chr(a-1+ord('A')), a)
+# Key0 ~ Key9
+for d in range(ord('0'), ord('9')+1):
+    setattr(UserEvent, 'Key'+chr(d), d)
+# A ~ Z
+for A in range(ord('A'), ord('Z')+1):
+    setattr(UserEvent, chr(A), A)
+# a - z
+for a in range(ord('a'), ord('z')+1):
+    setattr(UserEvent, chr(a), a)
+
+
+@dataclass
+class ProxyEvent:
+    _type: int
+    content: bytes = None
+
+    # class methods
+
+    WARNING = -1
+
+    FALSE = 0
+    TRUE  = 1
+
+    # data stream events
+    CUT_STREAM    = 0x80     # cut stream between server and client, only feed to the virtual terminal
+    RESUME_STREAM = 0x81     # resume stream
+
+    # message content events
+    DROP_CONTENT     = 0x90
+    REPLACE_CONTENT  = 0x91
+    INSERT_TO_CLIENT = 0x92
+    SEND_TO_CLIENT   = 0x93
+    INSERT_TO_SERVER = 0x94
+    SEND_TO_SERVER   = 0x95
+
+    # terminal events
+    TERMINAL_START = 0x100
+    RETURN = 0x101      # menu return
+    BOARD_NAME = 0x102
+    THREAD_URL = 0x103
+
+    no_arguments = { "FALSE", "TRUE", "CUT_STREAM", "RESUME_STREAM", "DROP_CONTENT" }
+
+    type2names = {}
+
+    def __repr__(self):
+        if self._type in self.type2names:
+            type = self.type2names[self._type]
+        else:
+            type = hex(self._type)
+        return "event(" + type + ", " + repr(self.content) + ")"
+
+    @classmethod
+    def as_bool(cls, value: bool):
+        return cls(cls.TRUE if value else cls.FALSE)
+
+    @classmethod
+    def eval_bool(cls, lets_do_it):
+        result = None
+        for event in lets_do_it:
+            if event is True or event is False:
+                result = event
+            elif event._type == cls.TRUE:
+                result = True
+            elif event._type == cls.FALSE:
+                result = False
+        return result
+
+    @classmethod
+    def eval_type(cls, lets_do_it, _type):
+        result = None
+        for event in lets_do_it:
+            if event._type == _type:
+                result = event.content
+        return result
+
+    @classmethod
+    def event_to_server(cls, event: int):
+        return cls(cls.SEND_TO_SERVER, UserEvent.to_bytes(event))
+
+ProxyEvent.type2names = {getattr(ProxyEvent, name):name for name in dir(ProxyEvent) if 'A' <= name[0] <= 'Z'}
+
+# make shortcuts like: ProxyEvent.cut_stream = ProxyEvent(ProxyEvent.CUT_STREAM)
+for name in ProxyEvent.no_arguments:
+    setattr(ProxyEvent, name.lower(), ProxyEvent(getattr(ProxyEvent, name)))
+
+# make shortcuts with content
+for name in ProxyEvent.type2names.values():
+    if name not in ProxyEvent.no_arguments:
+        # doesn't work as expected because the lambda (and the name in its body) is not eagerly evaluated.
+        # at the time it's evaluated outside this loop, it will be the last value in ProxyEvent.type2names (as a closure)
+        #setattr(ProxyEvent, name.lower(), lambda content: ProxyEvent(getattr(ProxyEvent, name), content))
+        #setattr(ProxyEvent, name.lower(), lambda content: ProxyEvent(getattr(ProxyEvent, f'{name}'), content))
+
+        # corret
+        setattr(ProxyEvent, name.lower(), eval(f"lambda content: ProxyEvent(getattr(ProxyEvent, '{name}'), content)"))
+
+# 'return' is a keyword
+ProxyEvent._return = lambda content: ProxyEvent(ProxyEvent.RETURN, content)
+
+@dataclass
+class ProxyEventTrigger:
+    _type: int
+    event: ProxyEvent
+
 
 ClientEvent = UserEvent
+
+
+if __name__ == "__main__":
+    print(ProxyEvent.as_bool(True))
+    print(ProxyEvent.cut_stream)
+    print(ProxyEvent.replace_content(b'112233'))
+    print(ProxyEvent._return("3434343"))
+
 

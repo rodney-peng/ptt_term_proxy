@@ -5,6 +5,7 @@ import asyncio
 import socket
 import traceback
 import copy
+import time
 from dataclasses import dataclass
 
 from mitmproxy import http, ctx
@@ -16,34 +17,59 @@ from ptt_terminal import PttTerminal
 
 class PttFlow:
 
+    MAX_CUT_TIME = 2    # in seconds
+
     def __init__(self, flow):
         self.flow = flow
         self.terminal = PttTerminal(128, 32)
-        self.msg_to_terminal = b''
 
+        self.msg_to_terminal = b''
+        self.terminal_event = asyncio.Event()
+        self.terminal_task = asyncio.create_task(self.terminal_msg_timeout(flow, self.terminal_event))
+
+        self.msg_to_server = []
         self.server_event = asyncio.Event()
-        self.server_task = asyncio.create_task(self.server_msg_timeout(flow, self.server_event))
+        self.server_task = asyncio.create_task(self.server_msg_sender(flow, self.server_event))
+
+        self.clientToServer = True
+        self.serverToClient = True
+        self.stream_cut_time = 0
 
     def done(self):
+        self.terminal_event.clear()
+        if not self.terminal_task.done():
+            self.terminal_task.cancel()
+
         self.server_event.clear()
         if not self.server_task.done():
             self.server_task.cancel()
 
     @dataclass
     class EventContext:
-        dropped: bool = False
-        replace: bytes = None
+        dropContent: bool = False
+        replaceContent: bytes = None
         insertToClient: bytes = b''
         sendToClient:   bytes = b''
         insertToServer: bytes = b''
         sendToServer:   bytes = b''
 
-    def terminal_events(self, handler, evctx: EventContext):
-        for event in handler:
-            if event._type == ProxyEvent.DROP_CONTENT:
-                evctx.dropped = True
+    def terminal_events(self, lets_do_it, evctx: EventContext):
+        for event in lets_do_it:
+#            print("proxy.terminal:", event)
+            if event._type == ProxyEvent.CUT_STREAM:
+                self.clientToServer = False
+                self.serverToClient = False
+                self.stream_cut_time = time.time()
+            elif event._type == ProxyEvent.RESUME_STREAM:
+                if not self.stream_cut_time:
+                    print("resume stream without cut!", file=sys.stderr)
+                self.clientToServer = True
+                self.serverToClient = True
+                self.stream_cut_time = 0
+            elif event._type == ProxyEvent.DROP_CONTENT:
+                evctx.dropContent = True
             elif event._type == ProxyEvent.REPLACE_CONTENT:
-                evctx.replace = event.content
+                evctx.replaceContent = event.content
             elif event._type == ProxyEvent.INSERT_TO_CLIENT:
                 evctx.insertToClient += event.content
             elif event._type == ProxyEvent.SEND_TO_CLIENT:
@@ -56,28 +82,30 @@ class PttFlow:
                 yield event
 
     def client_message(self, flow_msg):
-        handler = self.terminal.client_message(flow_msg.content)
+        lets_do_it = self.terminal.client_message(flow_msg.content)
         evctx = self.EventContext()
-        for event in self.terminal_events(handler, evctx):
+        for event in self.terminal_events(lets_do_it, evctx):
             print("proxy.terminal.client:", event)
 
         if evctx.insertToClient or evctx.sendToClient:
             ctx.master.sendToClient(self.flow, evctx.insertToClient + evctx.sendToClient)
 
-        if evctx.replace: flow_msg.content = replace
+        if evctx.replaceContent:
+            flow_msg.content = evctx.replaceContent
+            print("Replace client message!", len(flow_msg.content))
 
         if evctx.insertToServer or evctx.sendToServer:
-            flow_msg.content = evctx.insertToServer + (flow_msg.content if not evctx.dropped else b'') + evctx.sendToServer
-            print("Replace client message!", len(flow_msg.content))
-        elif evctx.dropped:
+            flow_msg.content = evctx.insertToServer + (flow_msg.content if not evctx.dropContent else b'') + evctx.sendToServer
+            print("Alter client message!", len(flow_msg.content))
+        elif evctx.dropContent:
             print("Drop client message!")
             flow_msg.drop()
 
     def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext):
         event.clear()
 
-        handler = self.terminal.server_message(self.msg_to_terminal)
-        for event in self.terminal_events(handler, evctx):
+        lets_do_it = self.terminal.server_message(self.msg_to_terminal)
+        for event in self.terminal_events(lets_do_it, evctx):
             print("proxy.terminal.server:", event)
 
         self.msg_to_terminal = b''
@@ -89,28 +117,32 @@ class PttFlow:
         lastSegment  = len(flow_msg.content) < 1021
 
         if firstSegment:
-            handler = self.terminal.pre_server_message()
-            for event in self.terminal_events(handler, evctx):
+            lets_do_it = self.terminal.pre_server_message()
+            for event in self.terminal_events(lets_do_it, evctx):
                 print("proxy.terminal.pre_server:", event)
 
         self.msg_to_terminal += flow_msg.content
 
+        if not self.serverToClient:
+#            print("proxy.server_message: drop server", len(flow_msg.content))
+            flow_msg.content = b''
+
         if lastSegment:
-            self.purge_terminal_message(self.server_event, evctx)
+            self.purge_terminal_message(self.terminal_event, evctx)
 
             if evctx.sendToClient:
                 flow_msg.content += evctx.sendToClient
         else:
-            self.server_event.set()
+            self.terminal_event.set()
 
         if evctx.insertToServer or evctx.sendToServer:
-            ctx.master.sendToServer(self.flow, evctx.insertToServer + evctx.sendToServer)
+            self.sendToServer(evctx.insertToServer + evctx.sendToServer)
 
         if firstSegment and evctx.insertToClient:
             flow_msg.content = evctx.insertToClient + flow_msg.content
 
-    async def server_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
-        print("server_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
+    async def terminal_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
+        print("terminal_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
 
         cancelled = False
         while (flow.websocket.timestamp_end is None) and not cancelled:
@@ -130,7 +162,7 @@ class PttFlow:
             while not cancelled:
                 try:
                     # message could be purged during sleeping
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.25)    # tried 0.1 but pending occasionally
                 except asyncio.CancelledError:
                     cancalled = True
                     break
@@ -145,17 +177,72 @@ class PttFlow:
 
             if len(self.msg_to_terminal):
                 print("Server event timeout! Pending:", len(self.msg_to_terminal))
-                self.purge_terminal_message(event, self.EventContext())
+                evctx = self.EventContext()
+                self.purge_terminal_message(event, evctx)
+
+                self.terminal.showScreen()
+
+                assert not evctx.dropContent
+                assert evctx.replaceContent is None
+                if evctx.insertToClient or evctx.sendToClient:
+                    ctx.master.sendToClient(flow, evctx.insertToClient + evctx.sendToClient)
+                if evctx.insertToServer or evctx.sendToServer:
+                    self.sendToServer(evctx.insertToServer + evctx.sendToServer)
             else:
                 event.clear()
 
-        print("server_msg_timeout() finished")
+        print("terminal_msg_timeout() finished")
+
+    def sendToServer(self, data: bytes):
+        self.msg_to_server.append(data)
+        self.server_event.set()
+
+    # rate-control for message to server
+    async def server_msg_sender(self, flow: http.HTTPFlow, event: asyncio.Event):
+        print("server_msg_sender() started, socket opened:", (flow.websocket.timestamp_end is None))
+
+        cancelled = False
+        while (flow.websocket.timestamp_end is None) and not cancelled:
+            try:
+                await event.wait()
+            except asyncio.CancelledError:
+                cancalled = True
+                break
+            except Exception:
+                traceback.print_exc()
+
+            while not cancelled and len(self.msg_to_server):
+                try:
+                    await asyncio.sleep(0.25)
+                    ctx.master.sendToServer(flow, self.msg_to_server.pop(0))
+                except asyncio.CancelledError:
+                    cancalled = True
+                    break
+                except Exception:
+                    traceback.print_exc()
+
+            event.clear()
+
+        print("server_msg_sender() finished")
 
     def handle_message(self, flow_msg):
         if flow_msg.from_client:
-            self.client_message(flow_msg)
+            # injected to server will always pass
+            if ctx.master.is_self_injected(flow_msg) or self.clientToServer:
+                self.client_message(flow_msg)
+            else:
+                flow_msg.drop()
         else:
             self.server_message(flow_msg)
+        if not flow_msg.content:
+#            print("proxy.handle_message: empty content!", "client" if flow_msg.from_client else "server")
+            flow_msg.drop()
+
+        if 0 < self.stream_cut_time < time.time() - self.MAX_CUT_TIME:
+            print("Passing maximum cut time, resume stream!!!", file=sys.stderr)
+            self.clientToServer = True
+            self.serverToClient = True
+            self.stream_cut_time = 0
 
 
 class PttProxy:
@@ -270,7 +357,8 @@ class PttProxy:
         if not self.is_running or self.is_done: return
 
         flow_msg = flow.websocket.messages[-1]
-        if ctx.master.is_self_injected(flow_msg): return
+        # message from client or injected to server will pass
+        if (not flow_msg.from_client) and ctx.master.is_self_injected(flow_msg): return
 
         self.pttFlows[flow].handle_message(flow_msg)
 

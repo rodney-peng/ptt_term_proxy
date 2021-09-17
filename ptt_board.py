@@ -19,6 +19,13 @@ class JumpToEntry(PttMenu):
         yield ProxyEvent.as_bool(lines[-1].startswith(" 跳至第幾項:"))
 
 
+class BoardInfo(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool("看板設定" in lines[-21] and "請按任意鍵繼續" in lines[-1])
+
+
 class PttBoard(PttMenu):
 
     def __init__(self, name):
@@ -71,7 +78,9 @@ class PttBoard(PttMenu):
                  ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
                  ClientEvent.Q: ThreadInfo,
-                 ClientEvent.Key_Enter: PttThread,
+                 ClientEvent.i: BoardInfo,
+                 ClientEvent.I: BoardInfo,
+                 ClientEvent.Enter: PttThread,
                  ClientEvent.Key_Right: PttThread,
                  ClientEvent.l:         PttThread,
                  ClientEvent.r:         PttThread,
@@ -89,21 +98,33 @@ class PttBoard(PttMenu):
     def isSubMenuEntered(self, menu, lines):
         if menu is ThreadInfo:
             url = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.THREAD_URL)
-            if url: self.makeThread(self.cursorLine).setURL(url)
+            if url: self.makeSubMenu(PttThread).setURL(url)
             print(self.prefix(), "URL:", url)
-            return url is not None
+            yield ProxyEvent.as_bool(url is not None)
         else:
-            return super().isSubMenuEntered(menu, lines)
+            yield from super().isSubMenuEntered(menu, lines)
 
     def makeSubMenu(self, menu):
         if menu is PttThread:
+            print(self.prefix(), "makeSubMenu", self.cursorLine)
             return self.makeThread(self.cursorLine)
         else:
             return super().makeSubMenu(menu)
 
+    def lets_do_subMenuExited(self, y, x, lines):
+        resume_event = self.subMenu.to_be_resumed()
+        yield from super().lets_do_subMenuExited(y, x, lines)
+        if resume_event: yield resume_event
+
     def post_update_is_self(self, y, x, lines):
         if not ProxyEvent.eval_bool(self.is_entered(lines, self.name)):
-            yield from self.exit()
+            if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
+                # switch to another thread
+                self.subMenu = PttThread(self) # cannot call makeThread() here since we don't have the title line
+                yield from self.subMenuEntered()
+                yield from self.subMenu.switch(y, x, lines)
+            else:
+                yield from self.exit()
 
     def post_update_self(self, returnFromSubMenu, y, x, lines):
         if returnFromSubMenu or self.is_cursor_moved():
