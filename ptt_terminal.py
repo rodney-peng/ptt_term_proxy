@@ -13,6 +13,7 @@ register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent
 from ptt_board import PttBoard
+from ptt_macro import macros_pmore_config
 
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
@@ -265,6 +266,8 @@ class PttTerminal:
 
         board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
         if board:
+            if len(self.boards) == 0:
+                yield ProxyEvent.run_macro(macros_pmore_config)
             if board not in self.boards:
                 self.boards[board] = PttBoard(board)
             self.board = self.boards[board]
@@ -276,6 +279,32 @@ class PttTerminal:
         print("server: (%d)" % len(content))
         self.feed(content)
         yield from self.post_server_message()
+
+    def currentState(self):
+        if self.board:
+            state = tuple()
+            menu = self.board.subMenu
+            while menu:
+                state += (type(menu),)
+                menu = menu.subMenu
+            return state
+        else:
+            return None
+
+    def verifyState(self, state):
+        if self.board and isinstance(state, tuple):
+            i = 0
+            menu = self.board.subMenu
+            while menu and i < len(state) and state[i].__qualname__ == type(menu).__qualname__:
+                menu = menu.subMenu
+                i += 1
+            return menu is None and i == len(state)
+        else:
+            return False
+
+    def verifyRow(self, row, pattern):
+        return re.search(pattern, self.screen.display[row]) is not None
+
 
 if __name__ == "__main__":
     PttTerminal(128, 32)

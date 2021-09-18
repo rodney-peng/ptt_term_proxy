@@ -83,6 +83,7 @@ class ProxyEvent:
     RETURN = 0x101      # menu return
     BOARD_NAME = 0x102
     THREAD_URL = 0x103
+    RUN_MACRO = 0x104
 
     no_arguments = { "FALSE", "TRUE", "CUT_STREAM", "RESUME_STREAM", "DROP_CONTENT" }
 

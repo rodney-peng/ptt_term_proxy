@@ -217,6 +217,7 @@ class myDumpMaster(DumpMaster):
         delete_module('ptt_thread')
         delete_module('ptt_menu')
         delete_module('ptt_event')
+        delete_module('ptt_macro')
 
         import glob
         for f in glob.glob("__pycache__/*"):

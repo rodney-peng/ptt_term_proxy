@@ -35,6 +35,10 @@ class PttFlow:
         self.serverToClient = True
         self.stream_cut_time = 0
 
+        self.macro = None
+        self.macro_event = asyncio.Event()
+        self.macro_task = None
+
     def done(self):
         self.terminal_event.clear()
         if not self.terminal_task.done():
@@ -43,6 +47,10 @@ class PttFlow:
         self.server_event.clear()
         if not self.server_task.done():
             self.server_task.cancel()
+
+        self.macro_event.clear()
+        if self.macro_task and not self.macro_task.done():
+            self.macro_task.cancel()
 
     @dataclass
     class EventContext:
@@ -66,6 +74,9 @@ class PttFlow:
                 self.clientToServer = True
                 self.serverToClient = True
                 self.stream_cut_time = 0
+            elif event._type == ProxyEvent.RUN_MACRO:
+                self.macro = event.content
+                print("Run macro:", self.macro)
             elif event._type == ProxyEvent.DROP_CONTENT:
                 evctx.dropContent = True
             elif event._type == ProxyEvent.REPLACE_CONTENT:
@@ -109,6 +120,9 @@ class PttFlow:
             print("proxy.terminal.server:", event)
 
         self.msg_to_terminal = b''
+
+        if self.macro_task and not self.macro_task.done():
+            self.macro_event.set()
 
     def server_message(self, flow_msg):
         evctx = self.EventContext()
@@ -225,6 +239,9 @@ class PttFlow:
 
         print("server_msg_sender() finished")
 
+    def macro_done(self, macros):
+        self.clientToServer = True
+
     def handle_message(self, flow_msg):
         if flow_msg.from_client:
             # injected to server will always pass
@@ -238,11 +255,116 @@ class PttFlow:
 #            print("proxy.handle_message: empty content!", "client" if flow_msg.from_client else "server")
             flow_msg.drop()
 
+        if self.macro:
+            if self.macro_task and not self.macro_task.done():
+                self.macro_task.cancel()
+            self.macro_event.clear()
+            self.macro_task = asyncio.create_task(self.run_macro(self.flow, self.macro, self.macro_event, self.macro_done))
+            self.macro = None
+            self.clientToServer = False
+
         if 0 < self.stream_cut_time < time.time() - self.MAX_CUT_TIME:
-            print("Passing maximum cut time, resume stream!!!", file=sys.stderr)
+            print("Maximum cut time exceeded, resume stream!!!", file=sys.stderr)
             self.clientToServer = True
             self.serverToClient = True
             self.stream_cut_time = 0
+
+    # return value:
+    #   False: to break
+    #   True:  to continue
+    #   bytes: priority data to send
+    #   None:  to loop normally
+    def handle_macro_event(self, macro, timeout, priority, retry):
+        if macro.state and not self.terminal.verifyState(macro.state):
+            print("expected state", macro.state, "but", self.terminal.currentState())
+            return False
+
+        if macro.timeout and macro.retry and macro.resend:
+            if timeout or priority:
+                if retry[0] < 0: retry[0] = macro.retry
+                if retry[0] > 0:
+                    print("retry", retry[0])
+                    if not priority:
+                        retry[0] -= 1
+                        return macro.resend
+                    else:
+                        return True
+                else:
+                    print("Exceed maximum retry!")
+                    retry[0] = -1
+                    return False
+            else:
+                retry[0] = -1
+
+        print(type(macro), macro)
+        if macro.row and macro.pattern and macro.retry:
+            if not self.terminal.verifyRow(macro.row, macro.pattern):
+                if retry[0] < 0: retry[0] = macro.retry
+                if retry[0] > 0:
+                    print("retry", retry[0])
+                    retry[0] -= 1
+                    return True
+                else:
+                    print("Exceed maximum retry!")
+                    retry[0] = -1
+                    return False
+            else:
+                print("found", macro.pattern)
+                retry[0] = -1
+
+        return None
+
+    async def run_macro(self, flow: http.HTTPFlow, macros, event: asyncio.Event, doneHook=None):
+        print("run_macro() started, socket opened:", (flow.websocket.timestamp_end is None))
+        retry = [-1]
+        i = 0
+        cancelled = False
+        prio_data = None
+        while (flow.websocket.timestamp_end is None) and not cancelled and i < len(macros):
+            await asyncio.sleep(0.5)
+            macro = macros[i]
+
+            ctx.master.sendToServer(flow, prio_data if prio_data else macro.data)
+            timeout = False
+            try:
+                await asyncio.wait_for(event.wait(), 1.0)
+            except asyncio.TimeoutError:
+                if macro.timeout:
+                    # ignore timeout and proceed
+                    event.set()
+                    timeout = True
+                else:
+                    print("macro event timeout!")
+                    break
+            except asyncio.CancelledError:
+                print("macro event cancelled!")
+                break
+            except Exception as e:
+                traceback.print_exc()
+
+            if event.is_set():
+                event.clear()
+                try:
+                    next = self.handle_macro_event(macro, timeout, prio_data is not None, retry)
+                except Exception as e:
+                    traceback.print_exc()
+                    break
+                if next is True:
+                    prio_data = None
+                    continue
+                elif next is False:
+                    break
+                elif isinstance(next, bytes):
+                    prio_data = next
+                    continue
+            else:
+                print("macro event is not set")
+                break
+            prio_data = None
+            i += 1
+
+        if doneHook: doneHook(macros)
+        print("run_macro() finished")
 
 
 class PttProxy:
