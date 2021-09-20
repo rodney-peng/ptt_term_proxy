@@ -262,6 +262,7 @@ class myDumpMaster(DumpMaster):
         1. first run "dir()" or "vars()" to see what is available, either "self" or "cls" is available most likely
         2. then run "vars(self)" or "vars(cls)" to see what attributes are available
         3. enter the leading character to repeat the last command: '.', '?', '!', backslash
+           just run "self.cmd_formats" to see the templates
         4. usually command is executed by addon's on_debug_command() method, prefixes the command with ':' to execute in the master
         5. hot-reload an addon, e.g. ptt_proxy.py:
 

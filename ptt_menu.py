@@ -16,6 +16,9 @@ class PttMenuTemplate:
         self.event_trigger = None
         self.resume_event = None    # to be checked by the parent
 
+    def __repr__(self):
+        return self._prefix
+
     def prefix(self):
         return f"In {self._prefix}:"
 
@@ -74,6 +77,7 @@ class PttMenu(PttMenuTemplate, ABC):
     def reset(self):
         super().reset()
         self.subMenu = None
+        self.__subMenuExited = False
 
     def client_event(self, event: ClientEvent):
         if self.subMenu:
@@ -129,9 +133,11 @@ class PttMenu(PttMenuTemplate, ABC):
         if False: yield
 
     def lets_do_new_subMenu(self, menu, y, x, lines):
-        self.subMenu = self.makeSubMenu(menu)
+        if self.subMenu is None:
+            self.subMenu = self.makeSubMenu(menu)
         yield from self.subMenuEntered()
         yield from self.subMenu.enter(y, x, lines)
+        yield from self.subMenu.post_update_self(False, y, x, lines)
 
     def post_update_is_submenu(self, y, x, lines):
         assert self.subMenu is None
@@ -234,6 +240,13 @@ class SearchBoard(PttMenu):
                   (lines[0].startswith("【 搜尋全站看板 】") or \
                    lines[0].startswith("【 選擇看板 】")) and \
                   lines[1].startswith("請輸入看板名稱") )
+
+
+class QuickSwitch(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[-1].startswith(" ★快速切換:"))
 
 
 class ThreadInfo(PttMenu):

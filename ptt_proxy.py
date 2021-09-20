@@ -12,8 +12,9 @@ from mitmproxy import http, ctx
 from mitmproxy.proxy import layer, layers
 
 from ptt_event import ProxyEvent
-from ptt_terminal import PttTerminal
-
+from ptt_terminal import PttTerminal, NotificationRendition
+from ptt_macro import MacroContext
+import ptt_macro
 
 class PttFlow:
 
@@ -75,8 +76,8 @@ class PttFlow:
                 self.serverToClient = True
                 self.stream_cut_time = 0
             elif event._type == ProxyEvent.RUN_MACRO:
-                self.macro = event.content
-                print("Run macro:", self.macro)
+                self.macro = getattr(ptt_macro, event.content)
+                print("Run macro:", event.content)
             elif event._type == ProxyEvent.DROP_CONTENT:
                 evctx.dropContent = True
             elif event._type == ProxyEvent.REPLACE_CONTENT:
@@ -99,7 +100,7 @@ class PttFlow:
             print("proxy.terminal.client:", event)
 
         if evctx.insertToClient or evctx.sendToClient:
-            ctx.master.sendToClient(self.flow, evctx.insertToClient + evctx.sendToClient)
+            self.sendToClient(evctx.insertToClient + evctx.sendToClient)
 
         if evctx.replaceContent:
             flow_msg.content = evctx.replaceContent
@@ -122,7 +123,17 @@ class PttFlow:
         self.msg_to_terminal = b''
 
         if self.macro_task and not self.macro_task.done():
+            lets_do_it = self.terminal.lets_do_notifyClient("macro running!")
+            for event in self.terminal_events(lets_do_it, evctx):
+                print("proxy.macro_running:", event)
             self.macro_event.set()
+
+        if self.macro:
+            if self.macro_task and not self.macro_task.done():
+                self.macro_task.cancel()
+            self.macro_event.clear()
+            self.macro_task = asyncio.create_task(self.run_macro(self.flow, self.macro, self.macro_event, self.macro_done))
+            self.macro = None
 
     def server_message(self, flow_msg):
         evctx = self.EventContext()
@@ -199,7 +210,7 @@ class PttFlow:
                 assert not evctx.dropContent
                 assert evctx.replaceContent is None
                 if evctx.insertToClient or evctx.sendToClient:
-                    ctx.master.sendToClient(flow, evctx.insertToClient + evctx.sendToClient)
+                    self.sendToClient(evctx.insertToClient + evctx.sendToClient)
                 if evctx.insertToServer or evctx.sendToServer:
                     self.sendToServer(evctx.insertToServer + evctx.sendToServer)
             else:
@@ -207,9 +218,14 @@ class PttFlow:
 
         print("terminal_msg_timeout() finished")
 
+    def sendToClient(self, data: bytes):
+        ctx.master.sendToClient(self.flow, data)
+
     def sendToServer(self, data: bytes):
         self.msg_to_server.append(data)
         self.server_event.set()
+
+    server_msg_interval = 0.5   # seconds
 
     # rate-control for message to server
     async def server_msg_sender(self, flow: http.HTTPFlow, event: asyncio.Event):
@@ -227,7 +243,7 @@ class PttFlow:
 
             while not cancelled and len(self.msg_to_server):
                 try:
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(self.server_msg_interval)
                     ctx.master.sendToServer(flow, self.msg_to_server.pop(0))
                 except asyncio.CancelledError:
                     cancalled = True
@@ -239,29 +255,9 @@ class PttFlow:
 
         print("server_msg_sender() finished")
 
-    def macro_done(self, macros):
-        self.clientToServer = True
-
-    def handle_message(self, flow_msg):
-        if flow_msg.from_client:
-            # injected to server will always pass
-            if ctx.master.is_self_injected(flow_msg) or self.clientToServer:
-                self.client_message(flow_msg)
-            else:
-                flow_msg.drop()
-        else:
-            self.server_message(flow_msg)
-        if not flow_msg.content:
-#            print("proxy.handle_message: empty content!", "client" if flow_msg.from_client else "server")
-            flow_msg.drop()
-
-        if self.macro:
-            if self.macro_task and not self.macro_task.done():
-                self.macro_task.cancel()
-            self.macro_event.clear()
-            self.macro_task = asyncio.create_task(self.run_macro(self.flow, self.macro, self.macro_event, self.macro_done))
-            self.macro = None
-            self.clientToServer = False
+    # all messages, self-injected message still has mark
+    def preview_message(self, flow_msg):
+        if (not flow_msg.from_client): print("wsmsg to client:", len(flow_msg.content))
 
         if 0 < self.stream_cut_time < time.time() - self.MAX_CUT_TIME:
             print("Maximum cut time exceeded, resume stream!!!", file=sys.stderr)
@@ -269,101 +265,58 @@ class PttFlow:
             self.serverToClient = True
             self.stream_cut_time = 0
 
-    # return value:
-    #   False: to break
-    #   True:  to continue
-    #   bytes: priority data to send
-    #   None:  to loop normally
-    def handle_macro_event(self, macro, timeout, priority, retry):
-        if macro.state and not self.terminal.verifyState(macro.state):
-            print("expected state", macro.state, "but", self.terminal.currentState())
-            return False
-
-        if macro.timeout and macro.retry and macro.resend:
-            if timeout or priority:
-                if retry[0] < 0: retry[0] = macro.retry
-                if retry[0] > 0:
-                    print("retry", retry[0])
-                    if not priority:
-                        retry[0] -= 1
-                        return macro.resend
-                    else:
-                        return True
-                else:
-                    print("Exceed maximum retry!")
-                    retry[0] = -1
-                    return False
+    # no self-injected to-client message
+    def handle_message(self, flow_msg):
+        if flow_msg.from_client:
+            # injected to server will always pass
+            if ctx.master.is_self_injected(flow_msg) or self.clientToServer:
+                self.client_message(flow_msg)
             else:
-                retry[0] = -1
+                print("\nclient dropped:", flow_msg.content)
+                flow_msg.drop()
+        else:
+            self.server_message(flow_msg)
+        if not flow_msg.content:
+#            print("proxy.handle_message: empty content!", "client" if flow_msg.from_client else "server")
+            flow_msg.drop()
 
-        print(type(macro), macro)
-        if macro.row and macro.pattern and macro.retry:
-            if not self.terminal.verifyRow(macro.row, macro.pattern):
-                if retry[0] < 0: retry[0] = macro.retry
-                if retry[0] > 0:
-                    print("retry", retry[0])
-                    retry[0] -= 1
-                    return True
-                else:
-                    print("Exceed maximum retry!")
-                    retry[0] = -1
-                    return False
-            else:
-                print("found", macro.pattern)
-                retry[0] = -1
+    def macro_done(self, macros, error = None):
+        self.clientToServer = True
 
-        return None
+        evctx = self.EventContext()
+        if error is None:
+            lets_do_it = self.terminal.lets_do_notifyClient("macro done!", NotificationRendition(width=20, blink=True))
+        else:
+            print(error, file=sys.stderr)
+            lets_do_it = self.terminal.lets_do_notifyClient(error, NotificationRendition(fg='red', center=True))
+        for event in self.terminal_events(lets_do_it, evctx):
+            print("proxy.macro_done:", event)
+        if evctx.insertToClient or evctx.sendToClient:
+            self.sendToClient(evctx.insertToClient + evctx.sendToClient)
+
+    def show_task_exception(self, task):
+        if task:
+            exc = task.exception()
+            if exc:
+                print(exc)
+                traceback.print_tb(getattr(exc, "__traceback__", None))
 
     async def run_macro(self, flow: http.HTTPFlow, macros, event: asyncio.Event, doneHook=None):
         print("run_macro() started, socket opened:", (flow.websocket.timestamp_end is None))
-        retry = [-1]
+
+        ctx = MacroContext(event, self.server_msg_interval + 1.0)
+        error = None
         i = 0
-        cancelled = False
-        prio_data = None
-        while (flow.websocket.timestamp_end is None) and not cancelled and i < len(macros):
-            await asyncio.sleep(0.5)
-            macro = macros[i]
-
-            ctx.master.sendToServer(flow, prio_data if prio_data else macro.data)
-            timeout = False
-            try:
-                await asyncio.wait_for(event.wait(), 1.0)
-            except asyncio.TimeoutError:
-                if macro.timeout:
-                    # ignore timeout and proceed
-                    event.set()
-                    timeout = True
-                else:
-                    print("macro event timeout!")
-                    break
-            except asyncio.CancelledError:
-                print("macro event cancelled!")
-                break
-            except Exception as e:
-                traceback.print_exc()
-
-            if event.is_set():
-                event.clear()
-                try:
-                    next = self.handle_macro_event(macro, timeout, prio_data is not None, retry)
-                except Exception as e:
-                    traceback.print_exc()
-                    break
-                if next is True:
-                    prio_data = None
-                    continue
-                elif next is False:
-                    break
-                elif isinstance(next, bytes):
-                    prio_data = next
-                    continue
+        while (flow.websocket.timestamp_end is None) and i < len(macros) and error is None:
+            status = await macros[i].run(self.sendToServer, self.terminal, ctx)
+            if isinstance(status, str):
+                error = status
+            elif status is False:
+                await event.wait()
             else:
-                print("macro event is not set")
-                break
-            prio_data = None
-            i += 1
+                i += 1
 
-        if doneHook: doneHook(macros)
+        if doneHook: doneHook(macros, error)
         print("run_macro() finished")
 
 
@@ -389,8 +342,10 @@ class PttProxy:
     def on_signal(self, signum: int):
         print("Addon got", signum, "(%d)" % int(signum))
 
-    cmd_formats = {'.':  "list(self.pttFlows.values())[0].terminal.{data}",
-                   '?':  "print(list(self.pttFlows.values())[0].terminal.{data})",
+    cmd_formats = {'.':  "self.ptt_flow.terminal.{data}",
+                   '?':  "print(self.ptt_flow.terminal.{data})",
+                   '#':  "self.ptt_flow.{data}",
+                   '$':  "print(self.ptt_flow.{data})",
                    '!':  "{data}",
                    '\\': "print({data})" }
 
@@ -456,7 +411,7 @@ class PttProxy:
             print(wslayer)
             ctx.master.websocketLayerStarted(wslayer)
 
-        self.pttFlows[flow] = PttFlow(flow)
+        self.pttFlows[flow] = self.ptt_flow = PttFlow(flow)
 
     def websocket_end(self, flow: http.HTTPFlow):
         print("websocket_end")
@@ -479,6 +434,9 @@ class PttProxy:
         if not self.is_running or self.is_done: return
 
         flow_msg = flow.websocket.messages[-1]
+
+        self.pttFlows[flow].preview_message(flow_msg)
+
         # message from client or injected to server will pass
         if (not flow_msg.from_client) and ctx.master.is_self_injected(flow_msg): return
 

@@ -7,13 +7,14 @@ import time
 import socket
 import traceback
 import inspect
+from dataclasses import dataclass
 
 from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent
+from ptt_menu import PttMenu, QuickSwitch, SearchBoard, HelpScreen
 from ptt_board import PttBoard
-from ptt_macro import macros_pmore_config
 
 # fix for double-byte character positioning and drawing
 class MyScreen(pyte.Screen):
@@ -38,6 +39,75 @@ class MyDebugStream(pyte.DebugStream):
         super(pyte.ByteStream, self).feed(chars)
 
 
+class BoardList(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[0].lstrip().startswith("【看板列表】") and lines[-1].lstrip().startswith("選擇看板"))
+
+    def reset(self):
+        super().reset()
+        self.boards = {}
+
+    def add(self, name, board):
+        self.boards[name] = board
+
+    def is_empty(self):
+        return len(self.boards) == 0
+
+    def enter(self, y, x, lines):
+        yield from super().enter(y, x, lines)
+        if lines[y].startswith('>'):
+            self.cursorLine = lines[y]
+            print(self.prefix(), lines[y])
+        else:
+            self.cursorLine = ""
+
+    def pre_update_self(self, y, x, lines):
+        self.cursorLine = lines[y]
+        yield from super().pre_update_self(y, x, lines)
+
+    subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
+                 ClientEvent.s: SearchBoard,
+                 ClientEvent.h: HelpScreen,
+                 ClientEvent.Enter:     PttBoard,
+                 ClientEvent.Key_Right: PttBoard,
+                 ClientEvent.l:         PttBoard,
+                 ClientEvent.r:         PttBoard,
+               }
+
+    def isSubMenuEntered(self, menu, lines):
+        if menu is PttBoard:
+            print(self.prefix(), "isSubMenuEntered", lines[-1])
+            if "請按任意鍵繼續" in lines[-1] or "動畫播放中" in lines[-1]:
+                print(self.prefix(), "isSubMenuEntered", self.cursorLine)
+                board = re.match("[> ]+[0-9]+[ ˇ]+([\w-]+)", self.cursorLine)
+                if board: board = board.group(1)
+            else:
+                board = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.BOARD_NAME)
+            if board:
+                if board not in self.boards:
+                    self.boards[board] = PttBoard(board)
+                self.subMenu = self.boards[board]
+            yield ProxyEvent.as_bool(board is not None)
+        else:
+            yield from super().isSubMenuEntered(menu, lines)
+
+    def post_update_self(self, returnFromSubMenu, y, x, lines):
+        if lines[y].startswith('>'):
+            self.cursorLine = lines[y]
+            print(self.prefix(), "post_update_self", lines[y])
+        if False: yield
+
+@dataclass
+class NotificationRendition:
+    width: int = 0
+    center: bool = False
+    blink: bool = False
+    fg: str = None  # pyte.graphics.FG
+    bg: str = None  # pyte.graphics.BG
+
+
 class PttTerminal:
 
     def __init__(self, columns, lines):
@@ -50,8 +120,8 @@ class PttTerminal:
 
     def reset(self):
         self.clientEvent = ClientEvent.Unknown
-        self.boards = {}
-        self.board = None
+        self.menu = None    # BoardList or PttBoard
+        self.boardlist = BoardList()
 
     # screen and stream operations
 
@@ -86,6 +156,40 @@ class PttTerminal:
             print("'%s'" % line)
         else:
             print("lines: %d" % self.screen.lines)
+
+    def cursor_position(self, y = None, x = None):
+        if y is None:
+            y = self.screen.cursor.y
+        elif y < 0:
+            y = self.screen.lines + y
+        if x is None:
+            x = self.screen.cursor.x
+        elif x < 0:
+            x = self.screen.columns + x
+
+        return b'\x1b[%d;%dH' % (y + 1, x + 1)
+
+    def selectGraphic(self, y = None, x = None, rendition: NotificationRendition = None):
+        if y is None or x is None:
+            return b'\x1b[0m'
+
+        if rendition and rendition.fg:
+            fg = rendition.fg
+        else:
+            fg = self.screen.buffer[y][x].fg
+        if rendition and rendition.bg:
+            bg = rendition.bg
+        else:
+            bg = self.screen.buffer[y][x].bg
+
+        def keyByValue(_dict, value):
+            return list(_dict.keys())[list(_dict.values()).index(value)]
+
+        blink = rendition.blink if rendition else False
+
+        fgcode = keyByValue(pyte.graphics.FG, fg)
+        bgcode = keyByValue(pyte.graphics.BG, bg)
+        return b"\x1b[" + (b'5;' if blink else b'') + b"%d;%dm" % (fgcode, bgcode)
 
     # messages from proxy
 
@@ -230,8 +334,8 @@ class PttTerminal:
             elif event == ClientEvent.Key_Down:
                 self.cursor_down()
 
-        if self.board:
-            yield from self.board.client_event(event)
+        if self.menu:
+            yield from self.menu.client_event(event)
         else:
             print("client event:", ClientEvent.name(event))
             self.clientEvent = event
@@ -239,10 +343,10 @@ class PttTerminal:
         if False: yield
 
     def pre_server_message(self):
-        if self.board:
+        if self.menu:
             y, x, line = self.cursor()
             lines = self.screen.display
-            for event in self.board.pre_update(y, x, lines):
+            for event in self.menu.pre_update(y, x, lines):
                 if event._type < ProxyEvent.TERMINAL_START:
                     yield event
                 else:
@@ -253,25 +357,30 @@ class PttTerminal:
     def post_server_message(self):
         y, x, line = self.cursor()
         lines = self.screen.display
-        if self.board:
-            for event in self.board.post_update(y, x, lines):
+        if self.menu:
+            for event in self.menu.post_update(y, x, lines):
                 if event._type == ProxyEvent.RETURN:
-                    print("terminal: exit", self.board.name)
-                    self.board = None
+                    print("terminal: exit", self.menu)
+                    self.menu = None
                 elif event._type < ProxyEvent.TERMINAL_START:
                     yield event
                 else:
                     print("terminal.post_server:", event)
-            if self.board: return
+            if self.menu: return
 
-        board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
-        if board:
-            if len(self.boards) == 0:
-                yield ProxyEvent.run_macro(macros_pmore_config)
-            if board not in self.boards:
-                self.boards[board] = PttBoard(board)
-            self.board = self.boards[board]
-            for event in self.board.enter(y, x, lines):
+        in_boardlist = ProxyEvent.eval_bool(BoardList.is_entered(lines))
+        if in_boardlist:
+            if self.boardlist.is_empty():
+                yield ProxyEvent.run_macro("macros_pmore_config")
+            self.menu = self.boardlist
+        else:
+            board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
+            if board:
+                self.menu = PttBoard(board)
+                self.boardlist.add(board, self.menu)
+
+        if self.menu:
+            for event in self.menu.enter(y, x, lines):
                 if event._type < ProxyEvent.TERMINAL_START:
                     yield event
 
@@ -280,30 +389,47 @@ class PttTerminal:
         self.feed(content)
         yield from self.post_server_message()
 
+    # macro support methods
+
     def currentState(self):
-        if self.board:
-            state = tuple()
-            menu = self.board.subMenu
+        if self.menu:
+            state = type(self.menu)
+            menu = self.menu.subMenu
             while menu:
-                state += (type(menu),)
+                state = type(menu)
                 menu = menu.subMenu
             return state
         else:
             return None
 
     def verifyState(self, state):
-        if self.board and isinstance(state, tuple):
-            i = 0
-            menu = self.board.subMenu
-            while menu and i < len(state) and state[i].__qualname__ == type(menu).__qualname__:
-                menu = menu.subMenu
-                i += 1
-            return menu is None and i == len(state)
+        from collections import abc
+        if isinstance(state, abc.Sequence):
+            return self.currentState() in state
         else:
-            return False
+            return self.currentState() is state
 
     def verifyRow(self, row, pattern):
         return re.search(pattern, self.screen.display[row]) is not None
+
+    def lets_do_notifyClient(self, message, rendition: NotificationRendition = None):
+        if rendition is None: rendition = NotificationRendition()
+
+        max_width = self.screen.columns if rendition.center else (self.screen.columns // 2)
+        rendition.width = min(rendition.width, max_width) if rendition.width else max_width
+        message = "{:^{width}}".format(message[:rendition.width], width=rendition.width)
+
+        if rendition.center:
+            x = (self.screen.columns // 2) - (len(message) // 2)
+        else:
+            x = -(self.screen.columns // 4) - (len(message) // 2)
+
+        data  = self.cursor_position(-1, x)
+        data += self.selectGraphic(-1, x, rendition)
+        data += message.encode("big5uao", "replace")
+        data += self.selectGraphic()    # reset color mode
+        data += self.cursor_position()  # restore cursor position
+        yield ProxyEvent.send_to_client(data)
 
 
 if __name__ == "__main__":

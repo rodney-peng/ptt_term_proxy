@@ -1,22 +1,15 @@
 import re
 
 from ptt_event import ProxyEvent, ClientEvent
-from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
+from ptt_menu import PttMenu, SearchBoard, QuickSwitch, HelpScreen, ThreadInfo
 from ptt_thread import PttThread
-
-
-class QuickSwitch(PttMenu):
-
-    @staticmethod
-    def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[-1].startswith(" ★快速切換:"))
 
 
 class JumpToEntry(PttMenu):
 
     @staticmethod
     def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[-1].startswith(" 跳至第幾項:"))
+        yield ProxyEvent.as_bool(lines[-1].strip().startswith("跳至第幾項:"))
 
 
 class BoardInfo(PttMenu):
@@ -24,6 +17,13 @@ class BoardInfo(PttMenu):
     @staticmethod
     def is_entered(lines):
         yield ProxyEvent.as_bool("看板設定" in lines[-21] and "請按任意鍵繼續" in lines[-1])
+
+
+class OnboardingScreen(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool("動畫播放中" in lines[-1] or "請按任意鍵繼續" in lines[-1])
 
 
 class PttBoard(PttMenu):
@@ -35,6 +35,7 @@ class PttBoard(PttMenu):
     def reset(self):
         super().reset()
         self._prefix = self.name
+        self.onboarding = False
         self.threads = {}
 
     @staticmethod
@@ -49,7 +50,23 @@ class PttBoard(PttMenu):
 
     def enter(self, y, x, lines):
         yield from super().enter(y, x, lines)
-        print(self.prefix(), lines[y])
+        self.cursorLine = ""
+
+        if "動畫播放中" in lines[-1] or "請按任意鍵繼續" in lines[-1]:
+            self.onboarding = True
+        elif lines[y].startswith('>'):
+            self.cursorLine = lines[y]
+            print(self.prefix(), lines[y])
+
+    def pre_update(self, y, x, lines):
+        if not self.onboarding:
+            yield from super().pre_update(y, x, lines)
+
+    def post_update(self, y, x, lines):
+        if self.onboarding:
+            self.onboarding = not ProxyEvent.eval_bool(self.is_entered(lines))
+        if not self.onboarding:
+            yield from super().post_update(y, x, lines)
 
     def makeThread(self, line):
         if '★' in line[:6]:
@@ -80,7 +97,8 @@ class PttBoard(PttMenu):
                  ClientEvent.Q: ThreadInfo,
                  ClientEvent.i: BoardInfo,
                  ClientEvent.I: BoardInfo,
-                 ClientEvent.Enter: PttThread,
+                 ClientEvent.b: OnboardingScreen,
+                 ClientEvent.Enter:     PttThread,
                  ClientEvent.Key_Right: PttThread,
                  ClientEvent.l:         PttThread,
                  ClientEvent.r:         PttThread,
@@ -127,8 +145,9 @@ class PttBoard(PttMenu):
                 yield from self.exit()
 
     def post_update_self(self, returnFromSubMenu, y, x, lines):
-        if returnFromSubMenu or self.is_cursor_moved():
-            print(self.prefix(), lines[y])
+        if lines[y].startswith('>'):
+            self.cursorLine = lines[y]
+            print(self.prefix(), "post_update_self", lines[y])
         if False: yield
 
     def is_cursor_moved(self):
