@@ -61,10 +61,13 @@ for a in range(ord('a'), ord('z')+1):
     setattr(UserEvent, chr(a), a)
 
 @dataclass
-class DrawClient:
+class ClientContext:
     row: int
     column: int
-    content: str
+    content: str = ""
+    fg: str = None
+    bg: str = None
+    length: int = 0
 
 @dataclass
 class ProxyEvent:
@@ -104,14 +107,15 @@ class ProxyEvent:
 
     # terminal requests, needs to be forwarded along the generator-chain
     TERMINAL_REQUEST = 0x200
-    SCREEN_COLUMN = 0x201
-    CURSOR_BACKGROUND = 0x202
+    REQ_SCREEN_COLUMN = 0x201
+    REQ_CURSOR_BACKGROUND = 0x202
+    REQ_SCREEN_DATA = 0x203
 
     no_arguments = { "FALSE", "TRUE", "OK",
                      "CUT_STREAM", "RESUME_STREAM",
                      "DROP_CONTENT",
                      "DRAW_CURSOR",
-                     "SCREEN_COLUMN", "CURSOR_BACKGROUND",
+                     "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND",
                    }
 
     type2names = {}
@@ -154,6 +158,10 @@ class ProxyEvent:
     @classmethod
     def event_to_server(cls, event: int):
         return cls(cls.SEND_TO_SERVER, UserEvent.to_bytes(event))
+
+    @classmethod
+    def event_to_client(cls, event: int):
+        return cls(cls.SEND_TO_CLIENT, UserEvent.to_bytes(event))
 
 ProxyEvent.type2names = {getattr(ProxyEvent, name):name for name in dir(ProxyEvent) if 'A' <= name[0] <= 'Z'}
 

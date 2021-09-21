@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from uao import register_uao
 register_uao()
 
-from ptt_event import ClientEvent, ProxyEvent
+from ptt_event import ClientEvent, ProxyEvent, ClientContext
 from ptt_menu import PttMenu, QuickSwitch, SearchBoard, SearchBox, HelpScreen, JumpToEntry
 from ptt_board import PttBoard
 
@@ -29,6 +29,36 @@ class MyScreen(pyte.Screen):
         if ord(char) > 0xff:
             super().draw('')
 
+    def rawData(self, y, x, fg: str = "", bg: str = ""):
+        data = self.buffer[y][x]
+#        print("rawData:", y, x, data)
+        raw = data.data.encode("big5uao", 'replace')
+        if fg != data.fg or bg != data.bg:
+            fgcode = self.fgCode(data.fg)
+            bgcode = self.bgCode(data.bg)
+            raw = (b'\x1b[%d;%dm' % (fgcode, bgcode)) + raw
+        return raw, data.fg, data.bg
+
+    def rawDataBlock(self, y, x, length):
+        fg = None
+        bg = None
+        data = b''
+        for i in range(length):
+            raw, fg, bg = self.rawData(y, x + i, fg, bg)
+            data += raw
+        return data
+
+    @staticmethod
+    def fgCode(value):
+        _dict = pyte.graphics.FG
+        if value == "default": value = "white"
+        return list(_dict.keys())[list(_dict.values()).index(value)]
+
+    @staticmethod
+    def bgCode(value):
+        _dict = pyte.graphics.BG
+        if value == "default": value = "black"
+        return list(_dict.keys())[list(_dict.values()).index(value)]
 
 # for event debugging
 class MyDebugStream(pyte.DebugStream):
@@ -193,17 +223,47 @@ class PttTerminal:
         else:
             bg = self.screen.buffer[y][x].bg
 
-        def keyByValue(_dict, value):
-            return list(_dict.keys())[list(_dict.values()).index(value)]
-
         blink = rendition.blink if rendition else False
 
-        fgcode = keyByValue(pyte.graphics.FG, fg)
-        bgcode = keyByValue(pyte.graphics.BG, bg)
+        fgcode = self.screen.fgCode(fg)
+        bgcode = self.screen.fgCode(bg)
         return b"\x1b[" + (b'5;' if blink else b'') + b"%d;%dm" % (fgcode, bgcode)
 
-    def draw(self, row, col, content):
-        return (b'\x1b[%d;%dH' % (row, col)) + content.encode("big5uao", "replace")
+    def draw(self, context: ClientContext):
+        row = context.row
+        col = context.column
+        content = context.content.encode("big5uao", "replace")
+        if row < 0: row = self.screen.lines + row + 1
+        row = 1 if row < 1 else min(self.screen.lines, row)
+        if col < 0: col = self.screen.columns + col + 1
+        col = 1 if col < 1 else min(self.screen.columns, col)
+        content = content[:self.screen.columns - col + 1]
+        if context.fg or context.bg:
+            fg = context.fg if context.fg else "white"
+            bg = context.bg if context.bg else "black"
+
+            fgcode = self.screen.fgCode(fg)
+            bgcode = self.screen.bgCode(bg)
+            return (b'\x1b[%d;%dH' % (row, col)) + (b"\x1b[0;%d;%dm" % (fgcode, bgcode)) + content
+        else:
+            return (b'\x1b[%d;%dH' % (row, col)) + content
+
+    def screenData(self, context: ClientContext):
+        row = context.row
+        col = context.column
+        if row < 0: row = self.screen.lines + row + 1
+        row = 1 if row < 1 else min(self.screen.lines, row)
+        if col < 0: col = self.screen.columns + col + 1
+        col = 1 if col < 1 else min(self.screen.columns, col)
+        length = min(context.length, self.screen.columns - col + 1)
+
+        ctx = context
+        ctx.row = row
+        ctx.column = col
+        ctx.content = ""
+        ctx.fg = ctx.bg = None
+
+        return self.draw(ctx) + self.screen.rawDataBlock(row - 1, col - 1, length) + self.selectGraphic()
 
     # messages from proxy
 
@@ -328,7 +388,7 @@ class PttTerminal:
                         replace += event.content
                         replaced = True
                     else:
-                        yield from self.lets_do_terminal_event(lets_do_it, event, True)
+                        yield from self.lets_do_terminal_event(lets_do_it, event)
             elif replaced and state == None:
                 replace += content[cmdBegin:n+1]
 
@@ -336,9 +396,9 @@ class PttTerminal:
 
         if replaced:
             if replace:
-                yield ProxyEvent(ProxyEvent.REPLACE_CONTENT, replace)
+                yield ProxyEvent.replace_content(replace)
             else:
-                yield ProxyEvent(ProxyEvent.DROP_CONTENT)
+                yield ProxyEvent.drop_content
 
     def client_event(self, event: ClientEvent, uncommitted = False):
         if uncommitted:
@@ -402,17 +462,20 @@ class PttTerminal:
     def lets_do_terminal_event(self, lets_do_it, event: ProxyEvent, pre_update = False):
         if event._type < ProxyEvent.TERMINAL_EVENT:
             yield event
-        elif event._type == ProxyEvent.SCREEN_COLUMN:
+        elif event._type == ProxyEvent.REQ_SCREEN_COLUMN:
             lets_do_it.send(self.screen.columns)
-        elif event._type == ProxyEvent.CURSOR_BACKGROUND:
+        elif event._type == ProxyEvent.REQ_CURSOR_BACKGROUND:
             lets_do_it.send(self.screen.buffer[self.screen.cursor.y][self.screen.cursor.x].bg)
+        elif event._type == ProxyEvent.REQ_SCREEN_DATA:
+            # event.content is a ptt_event.ClientContext object
+            data = self.screenData(event.content)
+            lets_do_it.send(data)
         elif event._type == ProxyEvent.DRAW_CLIENT:
-            # ptt_event.DrawClient
-            draw = event.content
-            data = self.draw(draw.row, draw.column, draw.content)
+            # event.content is a ptt_event.ClientContext object
+            data = self.draw(event.content)
             yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
         elif event._type == ProxyEvent.DRAW_CURSOR:
-            data = self.draw(self.screen.cursor.y + 1, self.screen.cursor.x + 1, '')
+            data = self.cursor_position()
             yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
         else:
             yield ProxyEvent.warning(event)

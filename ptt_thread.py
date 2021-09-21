@@ -6,7 +6,7 @@ import traceback
 from uao import register_uao
 register_uao()
 
-from ptt_event import ClientEvent, ProxyEvent, DrawClient
+from ptt_event import ClientEvent, ProxyEvent, ClientContext
 from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
 
 
@@ -30,12 +30,54 @@ class SearchThread(PttMenu):
 
     @staticmethod
     def is_entered(lines):
-        bg = yield ProxyEvent.cursor_background
+        bg = yield ProxyEvent.req_cursor_background
         assert bg is not None
         yield ProxyEvent.ok
         yield ProxyEvent.as_bool(bg == "white" and \
                   (lines[-2].startswith("[搜尋]關鍵字:") or lines[-2].startswith("區分大小寫(Y/N/Q)?")))
 
+
+class ProxyCommand(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.true
+
+    CommandRow = -1
+    CommandCol = 60
+    CommandPrompt = "Command:"
+    CommandMaxLen = CommandCol - len(CommandPrompt)
+
+    def enter(self, y, x, lines):
+        yield from super().enter(y, x, lines)
+
+        self.input = ""
+        self.screenData = yield ProxyEvent.req_screen_data(ClientContext(self.CommandRow, 1, length=self.CommandCol))
+        yield ProxyEvent.ok
+        print("ProxyCommand: screen data", self.screenData)
+
+        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1, self.CommandPrompt, fg="white", bg="black"))
+        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8, " " * self.CommandMaxLen, fg="black", bg="green"))
+        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8))
+
+    def exit(self):
+        yield from super().exit()
+        yield ProxyEvent.send_to_client(self.screenData)
+        yield ProxyEvent.draw_cursor
+
+    def client_event(self, event: ClientEvent):
+        yield from super().client_event(event)
+        yield ProxyEvent.drop_content
+        if ClientEvent.isViewable(event):
+            if len(self.input) < self.CommandMaxLen:
+                self.input += chr(event)
+                yield ProxyEvent.event_to_client(event)  # echo
+        elif event == ClientEvent.Backspace:
+            if self.input:
+                self.input = self.input[:-1]
+                yield ProxyEvent.send_to_client(b'\b \b')
+        elif event == ClientEvent.Enter:
+            yield from self.exit()
 
 # a PTT thread being viewed
 class PttThread(PttMenu):
@@ -110,6 +152,22 @@ class PttThread(PttMenu):
         self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
         self.setEnteringTrigger(ProxyEvent.resume_stream)
 
+    def client_event(self, event: ClientEvent):
+        if isinstance(self.subMenu, ProxyCommand):
+            quitMenu = False
+            def quit_menu(event):
+                nonlocal quitMenu
+                quitMenu = True
+            lets_do_it = super().client_event(event)
+            yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
+            if quitMenu:
+                yield from self.lets_do_subMenuExited(0, 0, [])
+        else:
+            yield from super().client_event(event)
+            if self.subMenu is None and self.clientEvent == ClientEvent.x:
+                yield ProxyEvent.drop_content
+                yield from self.lets_do_new_subMenu(ProxyCommand, 0, 0, [])
+
     def pre_update_pre_submenu(self, y, x, lines):
         if self.viewedLastRow:
             yield from self.lets_do_clearFloor()
@@ -146,6 +204,7 @@ class PttThread(PttMenu):
                  ClientEvent.Key9: JumpToPosition,
                  ClientEvent.Colon:     JumpToPosition,
                  ClientEvent.SemiColon: JumpToPosition,
+                 #ClientEvent.x: ProxyCommand,  # not work here since server won't send any data after 'x'
                }
 
     def isSubMenuEntered(self, menu, lines):
@@ -248,7 +307,7 @@ class PttThread(PttMenu):
     def lets_do_showFloor(self, firstLine, lastLine, lastRow):
         if not self.urlLine: return
 
-        columns = yield ProxyEvent.screen_column
+        columns = yield ProxyEvent.req_screen_column
         assert columns is not None
         yield ProxyEvent.ok
         if columns < self.minColumns: return
@@ -266,7 +325,7 @@ class PttThread(PttMenu):
             col = self.minColumns + 1 - self.maxWidth
             floor = floorStr(self.floors[i-1])
 #            print(self.prefix(), f"floor [{row:2}, {col:2}] = '{floor}'")
-            yield ProxyEvent.draw_client(DrawClient(row, col, floor))
+            yield ProxyEvent.draw_client(ClientContext(row, col, floor))
         if self.urlLine < lastLine:
             yield ProxyEvent.draw_cursor
             self.viewedLastRow = lastRow    # confirms floor is in view
@@ -281,7 +340,7 @@ class PttThread(PttMenu):
             col = self.minColumns + 1 - self.maxWidth
             floor = ' ' * self.maxWidth
 #            print(self.prefix(), f"clear floor [{row:2}, {col:2}] = '{floor}'")
-            yield ProxyEvent.draw_client(DrawClient(row, col, floor))
+            yield ProxyEvent.draw_client(ClientContext(row, col, floor))
         self.viewedLastRow = 0
 
     def scanFloor(self, first: int, last: int):
@@ -650,7 +709,7 @@ def test(thread):
     lets_do_it = thread.lets_do_view(screen)
     for event in lets_do_it:
         print("view:", event)
-        if event._type == ProxyEvent.SCREEN_COLUMN:
+        if event._type == ProxyEvent.REQ_SCREEN_COLUMN:
             lets_do_it.send(129)
 
     thread.show()
@@ -666,7 +725,7 @@ def test(thread):
     lets_do_it = thread.enter(0, 0, screen)
     for event in lets_do_it:
         print("enter:", event)
-        if event._type == ProxyEvent.SCREEN_COLUMN:
+        if event._type == ProxyEvent.REQ_SCREEN_COLUMN:
             lets_do_it.send(129)
 
 if __name__ == "__main__":

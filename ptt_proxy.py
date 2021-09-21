@@ -106,13 +106,13 @@ class PttFlow:
 
         if evctx.replaceContent:
             flow_msg.content = evctx.replaceContent
-            print("Replace client message!", len(flow_msg.content))
+            print("Replace client message:", flow_msg.content)
 
         if evctx.insertToServer or evctx.sendToServer:
             flow_msg.content = evctx.insertToServer + (flow_msg.content if not evctx.dropContent else b'') + evctx.sendToServer
-            print("Alter client message!", len(flow_msg.content))
+            print("Alter client message:", flow_msg.content)
         elif evctx.dropContent:
-            print("Drop client message!")
+            print("Drop client message:", flow_msg.content)
             flow_msg.drop()
 
     def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext):
@@ -221,6 +221,7 @@ class PttFlow:
         print("terminal_msg_timeout() finished")
 
     def sendToClient(self, data: bytes):
+        print("PttFlow.sendToClient:", data)
         ctx.master.sendToClient(self.flow, data)
 
     def sendToServer(self, data: bytes):

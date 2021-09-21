@@ -101,10 +101,10 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is not None
 
         quitMenu = False
-        lets_do_it = self.subMenu.pre_update(y, x, lines)
         def quit_menu(event):
             nonlocal quitMenu
             quitMenu = True
+        lets_do_it = self.subMenu.pre_update(y, x, lines)
         yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
 
         if quitMenu:
@@ -160,12 +160,12 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is None
 
         if self.clientEvent in getattr(self, "subMenus", {}):
-            menu = self.subMenus[self.clientEvent]
             entered = False
-            lets_do_it = self.isSubMenuEntered(menu, lines)
             def catch_bool(event):
                 nonlocal entered
                 entered = (event._type == ProxyEvent.TRUE)
+            menu = self.subMenus[self.clientEvent]
+            lets_do_it = self.isSubMenuEntered(menu, lines)
             yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
             if entered:
                 yield from self.lets_do_new_subMenu(menu, y, x, lines)
@@ -181,10 +181,10 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is not None
 
         quitMenu = False
-        lets_do_it = self.subMenu.post_update(y, x, lines)
         def quit_menu(event):
             nonlocal quitMenu
             quitMenu = True
+        lets_do_it = self.subMenu.post_update(y, x, lines)
         yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
 
         if quitMenu:
@@ -194,10 +194,10 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is None
 
         entered = None
-        lets_do_it = self.is_entered(lines)
         def catch_bool(event):
             nonlocal entered
             entered = (event._type == ProxyEvent.TRUE)
+        lets_do_it = self.is_entered(lines)
         yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
         assert entered is not None
 
