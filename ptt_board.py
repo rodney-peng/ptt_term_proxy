@@ -1,15 +1,8 @@
 import re
 
 from ptt_event import ProxyEvent, ClientEvent
-from ptt_menu import PttMenu, SearchBoard, QuickSwitch, HelpScreen, ThreadInfo
+from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry
 from ptt_thread import PttThread
-
-
-class JumpToEntry(PttMenu):
-
-    @staticmethod
-    def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[-1].strip().startswith("跳至第幾項:"))
 
 
 class BoardInfo(PttMenu):
@@ -98,6 +91,13 @@ class PttBoard(PttMenu):
                  ClientEvent.i: BoardInfo,
                  ClientEvent.I: BoardInfo,
                  ClientEvent.b: OnboardingScreen,
+                 ClientEvent.PoundSign:    SearchBox,
+                 ClientEvent.Slash:        SearchBox,
+                 ClientEvent.QuestionMark: SearchBox,
+                 ClientEvent.a: SearchBox,
+                 ClientEvent.Z: SearchBox,
+                 ClientEvent.G: SearchBox,
+                 ClientEvent.A: SearchBox,
                  ClientEvent.Enter:     PttThread,
                  ClientEvent.Key_Right: PttThread,
                  ClientEvent.l:         PttThread,
@@ -111,7 +111,8 @@ class PttBoard(PttMenu):
                  ClientEvent.Key6: JumpToEntry,
                  ClientEvent.Key7: JumpToEntry,
                  ClientEvent.Key8: JumpToEntry,
-                 ClientEvent.Key9: JumpToEntry }
+                 ClientEvent.Key9: JumpToEntry,
+               }
 
     def isSubMenuEntered(self, menu, lines):
         if menu is ThreadInfo:

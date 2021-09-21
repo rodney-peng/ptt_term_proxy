@@ -90,6 +90,8 @@ class PttFlow:
                 evctx.insertToServer += event.content
             elif event._type == ProxyEvent.SEND_TO_SERVER:
                 evctx.sendToServer += event.content
+            elif event._type == ProxyEvent.WARNING:
+                print("\n!!!", event, file=sys.stderr)
             else:
                 yield event
 
@@ -225,7 +227,7 @@ class PttFlow:
         self.msg_to_server.append(data)
         self.server_event.set()
 
-    server_msg_interval = 0.5   # seconds
+    server_msg_interval = 0.25   # seconds
 
     # rate-control for message to server
     async def server_msg_sender(self, flow: http.HTTPFlow, event: asyncio.Event):

@@ -1,3 +1,4 @@
+import re
 from abc import ABC, abstractmethod
 
 from ptt_event import ProxyEvent, ClientEvent, ProxyEventTrigger
@@ -98,6 +99,9 @@ class PttMenu(PttMenuTemplate, ABC):
         if quitMenu:
             yield from self.lets_do_subMenuExited(y, x, lines)
 
+    def pre_update_pre_submenu(self, y, x, lines):
+        if False: yield
+
     def pre_update_is_self(self, y, x, lines):
         if False: yield
 
@@ -114,7 +118,9 @@ class PttMenu(PttMenuTemplate, ABC):
             # TODO: should return anyway regardless of self.subMenu?
             return
 
-        if self.clientEvent not in getattr(self, "subMenus", {}):
+        if self.clientEvent in getattr(self, "subMenus", {}):
+            yield from self.pre_update_pre_submenu(y, x, lines)
+        else:
             yield from self.pre_update_is_self(y, x, lines)
             if self.exited: return
 
@@ -166,9 +172,14 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is not None
 
         quitMenu = False
-        for event in self.subMenu.post_update(y, x, lines):
+        lets_do_it = self.subMenu.post_update(y, x, lines)
+        for event in lets_do_it:
             if event._type == ProxyEvent.RETURN:
                 quitMenu = True
+            elif event._type == ProxyEvent.SCREEN_COLUMN:
+                columns = yield event
+                lets_do_it.send(columns)
+                yield ProxyEvent.ok
             else:
                 yield event
 
@@ -181,6 +192,7 @@ class PttMenu(PttMenuTemplate, ABC):
         if not ProxyEvent.eval_bool(self.is_entered(lines)):
             yield from self.exit()
 
+    # TODO: Is returnFromSubMenu still needed?
     def post_update_self(self, returnFromSubMenu, y, x, lines):
         if False: yield
 
@@ -238,8 +250,19 @@ class SearchBoard(PttMenu):
     def is_entered(lines):
         yield ProxyEvent.as_bool(
                   (lines[0].startswith("【 搜尋全站看板 】") or \
-                   lines[0].startswith("【 選擇看板 】")) and \
+                   lines[0].startswith("【 選擇看板 】") or \
+                   lines[0].startswith("【 搜尋所在位置看板 】")) and \
                   lines[1].startswith("請輸入看板名稱") )
+
+
+class SearchBox(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(
+                  lines[-1].startswith("搜尋") or \
+                  lines[-2].startswith("請輸入看板中文關鍵字:") or \
+                  re.search("(不支援.*搜尋|沒有.*關鍵字)", lines[-1]) is not None )
 
 
 class QuickSwitch(PttMenu):
@@ -247,6 +270,13 @@ class QuickSwitch(PttMenu):
     @staticmethod
     def is_entered(lines):
         yield ProxyEvent.as_bool(lines[-1].startswith(" ★快速切換:"))
+
+
+class JumpToEntry(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[-1].strip().startswith("跳至第幾項:"))
 
 
 class ThreadInfo(PttMenu):

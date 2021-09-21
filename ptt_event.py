@@ -1,17 +1,21 @@
 from dataclasses import dataclass
-
+from typing import Union, Any
 
 class UserEvent:
     Unknown = 0
 
-    Backspace = ord('\b')
-    Enter = ord('\r')
-    Tab = ord('\t')
-
-    # 32 ~ 126 is the same viewable ASCII code
-    Space  = ord(' ')
-    Colon  = ord(':')
-    SemiColon = ord(';')
+    punctuations = {
+        'Backspace': '\b',
+        'Enter': '\r',
+        'Tab': '\t',
+        # 32 ~ 126 is the same viewable ASCII code
+        'Space': ' ',
+        'Colon': ':',
+        'SemiColon': ';',
+        'PoundSign': '#',
+        'Slash': '/',
+        'QuestionMark': '?',
+    }
 
     Key_Up    = 0x101
     Key_Down  = 0x102
@@ -40,6 +44,9 @@ class UserEvent:
     def to_bytes(event: int):
         return event.to_bytes(1, 'big')
 
+for name, sign in UserEvent.punctuations.items():
+    setattr(UserEvent, name, ord(sign))
+
 # Ctrl_A ~ Ctrl_Z
 for a in range(1, 0x1a+1):
     setattr(UserEvent, 'Ctrl_'+chr(a-1+ord('A')), a)
@@ -53,11 +60,17 @@ for A in range(ord('A'), ord('Z')+1):
 for a in range(ord('a'), ord('z')+1):
     setattr(UserEvent, chr(a), a)
 
+@dataclass
+class DrawClient:
+    row: int
+    column: int
+    content: str
 
 @dataclass
 class ProxyEvent:
     _type: int
-    content: bytes = None
+    content: Union[bytes, Any] = None
+    # TODO: add "sender"
 
     # class methods
 
@@ -65,6 +78,7 @@ class ProxyEvent:
 
     FALSE = 0
     TRUE  = 1
+    OK = 2
 
     # data stream events
     CUT_STREAM    = 0x80     # cut stream between server and client, only feed to the virtual terminal
@@ -85,7 +99,11 @@ class ProxyEvent:
     THREAD_URL = 0x103
     RUN_MACRO = 0x104
 
-    no_arguments = { "FALSE", "TRUE", "CUT_STREAM", "RESUME_STREAM", "DROP_CONTENT" }
+    SCREEN_COLUMN = 0x105
+    DRAW_CLIENT = 0x106
+    DRAW_CURSOR = 0x107
+
+    no_arguments = { "FALSE", "TRUE", "OK", "CUT_STREAM", "RESUME_STREAM", "DROP_CONTENT", "SCREEN_COLUMN", "DRAW_CURSOR" }
 
     type2names = {}
 
@@ -158,5 +176,6 @@ if __name__ == "__main__":
     print(ProxyEvent.cut_stream)
     print(ProxyEvent.replace_content(b'112233'))
     print(ProxyEvent._return("3434343"))
+    print(ProxyEvent.true)
 
 

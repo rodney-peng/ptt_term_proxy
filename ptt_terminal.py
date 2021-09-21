@@ -13,7 +13,7 @@ from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent
-from ptt_menu import PttMenu, QuickSwitch, SearchBoard, HelpScreen
+from ptt_menu import PttMenu, QuickSwitch, SearchBoard, SearchBox, HelpScreen, JumpToEntry
 from ptt_board import PttBoard
 
 # fix for double-byte character positioning and drawing
@@ -68,12 +68,23 @@ class BoardList(PttMenu):
         yield from super().pre_update_self(y, x, lines)
 
     subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
+                 ClientEvent.Ctrl_S: SearchBoard,
                  ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
+                 ClientEvent.Slash: SearchBox,
                  ClientEvent.Enter:     PttBoard,
                  ClientEvent.Key_Right: PttBoard,
                  ClientEvent.l:         PttBoard,
                  ClientEvent.r:         PttBoard,
+                 ClientEvent.Key1: JumpToEntry,
+                 ClientEvent.Key2: JumpToEntry,
+                 ClientEvent.Key3: JumpToEntry,
+                 ClientEvent.Key4: JumpToEntry,
+                 ClientEvent.Key5: JumpToEntry,
+                 ClientEvent.Key6: JumpToEntry,
+                 ClientEvent.Key7: JumpToEntry,
+                 ClientEvent.Key8: JumpToEntry,
+                 ClientEvent.Key9: JumpToEntry,
                }
 
     def isSubMenuEntered(self, menu, lines):
@@ -191,6 +202,9 @@ class PttTerminal:
         bgcode = keyByValue(pyte.graphics.BG, bg)
         return b"\x1b[" + (b'5;' if blink else b'') + b"%d;%dm" % (fgcode, bgcode)
 
+    def draw(self, row, col, content):
+        return (b'\x1b[%d;%dH' % (row, col)) + content.encode("big5uao", "replace")
+
     # messages from proxy
 
     vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
@@ -302,7 +316,8 @@ class PttTerminal:
 
             if handler:    # a generator
                 assert inspect.isgenerator(handler)
-                for event in handler:
+                lets_do_it = handler
+                for event in lets_do_it:
                     if event._type == ProxyEvent.DROP_CONTENT:
                         # drop the current input
                         if not replaced: replace = content[:cmdBegin]
@@ -312,10 +327,8 @@ class PttTerminal:
                         if not replaced: replace = content[:cmdBegin]
                         replace += event.content
                         replaced = True
-                    elif event._type < ProxyEvent.TERMINAL_START:
-                        yield event
                     else:
-                        print("terminal.client:", event)
+                        yield from self.lets_do_terminal_event(lets_do_it, event, True)
             elif replaced and state == None:
                 replace += content[cmdBegin:n+1]
 
@@ -346,11 +359,9 @@ class PttTerminal:
         if self.menu:
             y, x, line = self.cursor()
             lines = self.screen.display
-            for event in self.menu.pre_update(y, x, lines):
-                if event._type < ProxyEvent.TERMINAL_START:
-                    yield event
-                else:
-                    print("terminal.pre_server:", event)
+            lets_do_it = self.menu.pre_update(y, x, lines)
+            for event in lets_do_it:
+                yield from self.lets_do_terminal_event(lets_do_it, event, True)
 
         if False: yield
 
@@ -358,20 +369,19 @@ class PttTerminal:
         y, x, line = self.cursor()
         lines = self.screen.display
         if self.menu:
-            for event in self.menu.post_update(y, x, lines):
+            lets_do_it = self.menu.post_update(y, x, lines)
+            for event in lets_do_it:
                 if event._type == ProxyEvent.RETURN:
                     print("terminal: exit", self.menu)
                     self.menu = None
-                elif event._type < ProxyEvent.TERMINAL_START:
-                    yield event
                 else:
-                    print("terminal.post_server:", event)
+                    yield from self.lets_do_terminal_event(lets_do_it, event)
             if self.menu: return
 
         in_boardlist = ProxyEvent.eval_bool(BoardList.is_entered(lines))
         if in_boardlist:
-            if self.boardlist.is_empty():
-                yield ProxyEvent.run_macro("macros_pmore_config")
+#            if self.boardlist.is_empty():
+#                yield ProxyEvent.run_macro("macros_pmore_config")
             self.menu = self.boardlist
         else:
             board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
@@ -380,14 +390,30 @@ class PttTerminal:
                 self.boardlist.add(board, self.menu)
 
         if self.menu:
-            for event in self.menu.enter(y, x, lines):
-                if event._type < ProxyEvent.TERMINAL_START:
-                    yield event
+            lets_do_it = self.menu.enter(y, x, lines)
+            for event in lets_do_it:
+                yield from self.lets_do_terminal_event(lets_do_it, event)
 
     def server_message(self, content):
         print("server: (%d)" % len(content))
         self.feed(content)
         yield from self.post_server_message()
+
+    def lets_do_terminal_event(self, lets_do_it, event: ProxyEvent, pre_update = False):
+        if event._type < ProxyEvent.TERMINAL_START:
+            yield event
+        elif event._type == ProxyEvent.SCREEN_COLUMN:
+            lets_do_it.send(self.screen.columns)
+        elif event._type == ProxyEvent.DRAW_CLIENT:
+            # ptt_event.DrawClient
+            draw = event.content
+            data = self.draw(draw.row, draw.column, draw.content)
+            yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+        elif event._type == ProxyEvent.DRAW_CURSOR:
+            data = self.draw(self.screen.cursor.y + 1, self.screen.cursor.x + 1, '')
+            yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+        else:
+            yield ProxyEvent.warning(event)
 
     # macro support methods
 

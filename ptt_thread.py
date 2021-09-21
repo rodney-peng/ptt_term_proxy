@@ -6,8 +6,8 @@ import traceback
 from uao import register_uao
 register_uao()
 
-from ptt_event import ClientEvent, ProxyEvent, ProxyEventTrigger
-from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
+from ptt_event import ClientEvent, ProxyEvent, DrawClient
+from ptt_menu import PttMenu, SearchBoard, SearchBox, HelpScreen, ThreadInfo
 
 
 class ThreadOption(PttMenu):
@@ -55,6 +55,9 @@ class PttThread(PttMenu):
         self.elapsedTime = 0  # in seconds
 
         self.atBegin = self.atEnd = False
+        self.viewedFirstLine = 0
+        self.viewedLastLine = 0
+        self.viewedLastRow = 0
 
     def setURL(self, url: str):
         if url != self.url:
@@ -82,7 +85,6 @@ class PttThread(PttMenu):
 
         yield from super().enter(y, x, lines)
         if self.url: print(self.prefix(), "has URL", self.url)
-        yield from self.lets_do_view(lines)
 
     def switch(self, y, x, lines):
         yield from super().switch(y, x, lines)
@@ -93,8 +95,17 @@ class PttThread(PttMenu):
         self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)   # to re-enter the thread
         self.setEnteringTrigger(ProxyEvent.resume_stream)
 
-    # how to carry returnFromSubMenu from pre_update() to post_update?
+    def pre_update_pre_submenu(self, y, x, lines):
+        if self.viewedLastRow:
+            yield from self.lets_do_clearFloor()
+
     def pre_update_is_self(self, y, x, lines):
+        if self.viewedLastRow:
+            yield from self.lets_do_clearFloor()
+
+        # not include 't' which is determined in post_update_is_self() because
+        # 't' goes to the next page or jumps to the next article in the same series,
+        # and can only be determined in post_update_is_self().
         if self.is_switch_event(self.clientEvent):
             yield from self.exit()
 
@@ -104,15 +115,12 @@ class PttThread(PttMenu):
                (event == ClientEvent.Key_Down and self.atEnd) or \
                (event == ClientEvent.Key_Right and self.atEnd) or \
                (chr(event) in "fb[]+-=Aa")
-               # 't' goes to the next page or jumps to the next article in the same series.
-               # it can only be determined in post_update_is_self().
 
     subMenus = { ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
                  ClientEvent.o: ThreadOption,
                  ClientEvent.Q: ThreadInfo,
-                 ClientEvent.Colon:     JumpToPosition,
-                 ClientEvent.SemiColon: JumpToPosition,
+                 ClientEvent.Slash: SearchBox,
                  ClientEvent.Key1: JumpToPosition,
                  ClientEvent.Key2: JumpToPosition,
                  ClientEvent.Key3: JumpToPosition,
@@ -121,7 +129,10 @@ class PttThread(PttMenu):
                  ClientEvent.Key6: JumpToPosition,
                  ClientEvent.Key7: JumpToPosition,
                  ClientEvent.Key8: JumpToPosition,
-                 ClientEvent.Key9: JumpToPosition }
+                 ClientEvent.Key9: JumpToPosition,
+                 ClientEvent.Colon:     JumpToPosition,
+                 ClientEvent.SemiColon: JumpToPosition,
+               }
 
     def isSubMenuEntered(self, menu, lines):
         # once in ThreadInfo, it exits to the board rather than the thread
@@ -201,16 +212,58 @@ class PttThread(PttMenu):
             f += 1
 
         if f <= last:
-            yield ProxyEvent(ProxyEvent.WARNING, self.prefix() + " Caution: line wrap is probably missing!")
+            yield ProxyEvent.warning(self.prefix() + " Caution: line wrap is probably missing!")
+
+        self.viewedFirstLine = first
+        self.viewedLastLine = last
+        self.viewedLastRow = 0  # also means floor in view if not 0, to be confirmed by lets_do_showFloor()
 
         self.scanFloor(first, last)
-        updateScreen = 0 < self.urlLine < last
-        lastRow = i
+        yield from self.lets_do_showFloor(first, last, i)
 
-        if False: yield
+    minColumns = 86
+    maxWidth = 5
+
+    def lets_do_showFloor(self, firstLine, lastLine, lastRow):
+        if not self.urlLine: return
+
+        columns = yield ProxyEvent.screen_column
+#        print(self.prefix(), "columns", columns)
+        yield ProxyEvent.ok
+        if columns < self.minColumns: return
+
+        def floorStr(floor):
+            if floor:
+                return "{:^{width}}".format(floor, width = self.maxWidth)
+            else:
+                return ' ' * self.maxWidth
+
+        firstLine = max(firstLine-1, self.urlLine)
+        for i in range(lastLine, firstLine, -1):
+            if not self.floors[i-1]: continue
+            row = lastRow - (lastLine - i)
+            col = self.minColumns + 1 - self.maxWidth
+            floor = floorStr(self.floors[i-1])
+#            print(self.prefix(), f"floor [{row:2}, {col:2}] = '{floor}'")
+            yield ProxyEvent.draw_client(DrawClient(row, col, floor))
+        if self.urlLine < lastLine:
+            yield ProxyEvent.draw_cursor            
+            self.viewedLastRow = lastRow    # confirms floor is in view
+
+    def lets_do_clearFloor(self):
+        if not self.viewedLastRow: return
+        firstLine = max(self.viewedFirstLine-1, self.urlLine)
+        lastLine = self.viewedLastLine
+        for i in range(lastLine, firstLine, -1):
+            if not self.floors[i-1]: continue
+            row = self.viewedLastRow - (lastLine - i)
+            col = self.minColumns + 1 - self.maxWidth
+            floor = ' ' * self.maxWidth
+#            print(self.prefix(), f"clear floor [{row:2}, {col:2}] = '{floor}'")
+            yield ProxyEvent.draw_client(DrawClient(row, col, floor))
+        self.viewedLastRow = 0
 
     def scanFloor(self, first: int, last: int):
-#        re_floor_in_front = "(\ *?[0-9]+\ )?"
         re_push_msg = "(推|噓|→) [0-9A-Za-z]+\ *:"
         if not self.scanURL(): return False
         if self.lastFloorLine:
@@ -573,8 +626,11 @@ def test(thread):
     for i in range(len(screen)):
         print(f"{i+1:2} '{screen[i]}'")
 
-    for event in thread.lets_do_view(screen):
-        print(event)
+    lets_do_it = thread.lets_do_view(screen)
+    for event in lets_do_it:
+        print("view:", event)
+        if event._type == ProxyEvent.SCREEN_COLUMN:
+            lets_do_it.send(129)
 
     thread.show()
     print("lastLine", thread.lastLine, "lastFloor", thread.lastFloorLine)
@@ -582,14 +638,15 @@ def test(thread):
 
     # test thread switch
     for event in thread.client_event(ClientEvent.Key_Up):
-        print(event)
+        print("client_event:", event)
     for event in thread.pre_update(0, 0, screen):
-        print(event)
+        print("pre_update:", event)
 
-    thread.key = "      "
-    thread.url = None
-    for event in thread.enter(0, 0, screen):
-        print(event)
+    lets_do_it = thread.enter(0, 0, screen)
+    for event in lets_do_it:
+        print("enter:", event)
+        if event._type == ProxyEvent.SCREEN_COLUMN:
+            lets_do_it.send(129)
 
 if __name__ == "__main__":
     from ptt_board import PttBoard
