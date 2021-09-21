@@ -400,10 +400,12 @@ class PttTerminal:
         yield from self.post_server_message()
 
     def lets_do_terminal_event(self, lets_do_it, event: ProxyEvent, pre_update = False):
-        if event._type < ProxyEvent.TERMINAL_START:
+        if event._type < ProxyEvent.TERMINAL_EVENT:
             yield event
         elif event._type == ProxyEvent.SCREEN_COLUMN:
             lets_do_it.send(self.screen.columns)
+        elif event._type == ProxyEvent.CURSOR_BACKGROUND:
+            lets_do_it.send(self.screen.buffer[self.screen.cursor.y][self.screen.cursor.x].bg)
         elif event._type == ProxyEvent.DRAW_CLIENT:
             # ptt_event.DrawClient
             draw = event.content

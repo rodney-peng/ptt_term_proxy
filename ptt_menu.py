@@ -1,11 +1,10 @@
 import re
+import inspect
 from abc import ABC, abstractmethod
 
 from ptt_event import ProxyEvent, ClientEvent, ProxyEventTrigger
 
 class PttMenuTemplate:
-
-    event_trigger: ProxyEventTrigger
 
     def __init__(self):
         self.reset()
@@ -14,7 +13,6 @@ class PttMenuTemplate:
         self._prefix = type(self).__qualname__
         self.clientEvent = ClientEvent.Unknown
         self.exited = False
-        self.event_trigger = None
         self.resume_event = None    # to be checked by the parent
 
     def __repr__(self):
@@ -27,7 +25,6 @@ class PttMenuTemplate:
     def enter(self, y, x, lines):
         print(self.prefix(), "entered")
         self.exited = False
-        self.event_trigger = None
         self.resume_event = None
         if False: yield
 
@@ -35,7 +32,6 @@ class PttMenuTemplate:
     def switch(self, y, x, lines):
         print(self.prefix(), "switched")
         self.exited = False
-        self.event_trigger = None
         self.resume_event = None
         if False: yield
 
@@ -60,18 +56,33 @@ class PttMenuTemplate:
     def to_be_resumed(self):
         return self.resume_event
 
-    def evaluate(self, lets_do_it):
-        if self.event_trigger:
-            triggered = False
-            for event in lets_do_it:
-                if event._type == self.event_trigger._type:
-                    triggered = True
-                    yield self.event_trigger.event
+    # handling forward of terminal requests
+    def evaluate(self, lets_do_it, watched={}):
+        for event in lets_do_it:
+            if event._type in watched:
+                handler = watched[event._type]
+                if inspect.isgenerator(handler):
+                    yield from handler
+                elif callable(handler):
+                    event = handler(event)
+                    if event is not None: yield event
+                else:
+                    yield handler
+            elif event._type > ProxyEvent.TERMINAL_REQUEST:
+                response = yield event
+                reply = lets_do_it.send(response)
+                yield reply
+            else:
                 yield event
-            if triggered:
-                self.event_trigger = None
-        else:
-            yield from lets_do_it
+        '''
+        triggered = False
+            if event._type == self.event_trigger._type:
+                triggered = True
+                yield self.event_trigger.event
+            yield event
+        if triggered:
+            self.event_trigger = None
+        '''
 
 class PttMenu(PttMenuTemplate, ABC):
 
@@ -90,11 +101,11 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is not None
 
         quitMenu = False
-        for event in self.subMenu.pre_update(y, x, lines):
-            if event._type == ProxyEvent.RETURN:
-                quitMenu = True
-            else:
-                yield event
+        lets_do_it = self.subMenu.pre_update(y, x, lines)
+        def quit_menu(event):
+            nonlocal quitMenu
+            quitMenu = True
+        yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
 
         if quitMenu:
             yield from self.lets_do_subMenuExited(y, x, lines)
@@ -151,13 +162,11 @@ class PttMenu(PttMenuTemplate, ABC):
         if self.clientEvent in getattr(self, "subMenus", {}):
             menu = self.subMenus[self.clientEvent]
             entered = False
-            for event in self.isSubMenuEntered(menu, lines):
-                if (event is True) or (event is False):
-                    entered = event
-                elif event._type == ProxyEvent.TRUE or event._type == ProxyEvent.FALSE:
-                    entered = (event._type == ProxyEvent.TRUE)
-                else:
-                    yield event
+            lets_do_it = self.isSubMenuEntered(menu, lines)
+            def catch_bool(event):
+                nonlocal entered
+                entered = (event._type == ProxyEvent.TRUE)
+            yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
             if entered:
                 yield from self.lets_do_new_subMenu(menu, y, x, lines)
 
@@ -173,15 +182,10 @@ class PttMenu(PttMenuTemplate, ABC):
 
         quitMenu = False
         lets_do_it = self.subMenu.post_update(y, x, lines)
-        for event in lets_do_it:
-            if event._type == ProxyEvent.RETURN:
-                quitMenu = True
-            elif event._type == ProxyEvent.SCREEN_COLUMN:
-                columns = yield event
-                lets_do_it.send(columns)
-                yield ProxyEvent.ok
-            else:
-                yield event
+        def quit_menu(event):
+            nonlocal quitMenu
+            quitMenu = True
+        yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
 
         if quitMenu:
             yield from self.lets_do_subMenuExited(y, x, lines)
@@ -189,10 +193,17 @@ class PttMenu(PttMenuTemplate, ABC):
     def post_update_is_self(self, y, x, lines):
         assert self.subMenu is None
 
-        if not ProxyEvent.eval_bool(self.is_entered(lines)):
-            yield from self.exit()
+        entered = None
+        lets_do_it = self.is_entered(lines)
+        def catch_bool(event):
+            nonlocal entered
+            entered = (event._type == ProxyEvent.TRUE)
+        yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
+        assert entered is not None
 
-    # TODO: Is returnFromSubMenu still needed?
+        if not entered: yield from self.exit()
+
+    # TODO: Is returnFromSubMenu still necessary?
     def post_update_self(self, returnFromSubMenu, y, x, lines):
         if False: yield
 
@@ -306,8 +317,7 @@ def test(menu):
         print(event)
     for event in menu.pre_update(0, 0, lines):
         print(event)
-    menu.event_trigger = ProxyEventTrigger(ProxyEvent.RETURN, ProxyEvent.event_to_server(ClientEvent.Space))
-    for event in menu.evaluate(menu.post_update(0, 0, lines)):
+    for event in menu.post_update(0, 0, lines):
         print(event)
     # exit() will be called in post_update() as the lines are blank
     #for event in info.exit():

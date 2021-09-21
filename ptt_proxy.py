@@ -91,7 +91,7 @@ class PttFlow:
             elif event._type == ProxyEvent.SEND_TO_SERVER:
                 evctx.sendToServer += event.content
             elif event._type == ProxyEvent.WARNING:
-                print("\n!!!", event, file=sys.stderr)
+                print("\n!!! proxy:", event, file=sys.stderr)
             else:
                 yield event
 
@@ -224,7 +224,7 @@ class PttFlow:
         ctx.master.sendToClient(self.flow, data)
 
     def sendToServer(self, data: bytes):
-        self.msg_to_server.append(data)
+        self.msg_to_server.extend([i.to_bytes(1, "big") for i in data])
         self.server_event.set()
 
     server_msg_interval = 0.25   # seconds

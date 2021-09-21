@@ -139,7 +139,8 @@ class PttBoard(PttMenu):
         if not ProxyEvent.eval_bool(self.is_entered(lines, self.name)):
             if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
                 # switch to another thread
-                self.subMenu = PttThread(self) # cannot call makeThread() here since we don't have the title line
+                # cannot call makeThread() here since we don't have the title line
+                self.subMenu = PttThread(self)
                 yield from self.subMenuEntered()
                 yield from self.subMenu.switch(y, x, lines)
             else:

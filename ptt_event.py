@@ -93,26 +93,39 @@ class ProxyEvent:
     SEND_TO_SERVER   = 0x95
 
     # terminal events
-    TERMINAL_START = 0x100
+    TERMINAL_EVENT = 0x100
     RETURN = 0x101      # menu return
     BOARD_NAME = 0x102
     THREAD_URL = 0x103
     RUN_MACRO = 0x104
 
-    SCREEN_COLUMN = 0x105
     DRAW_CLIENT = 0x106
     DRAW_CURSOR = 0x107
 
-    no_arguments = { "FALSE", "TRUE", "OK", "CUT_STREAM", "RESUME_STREAM", "DROP_CONTENT", "SCREEN_COLUMN", "DRAW_CURSOR" }
+    # terminal requests, needs to be forwarded along the generator-chain
+    TERMINAL_REQUEST = 0x200
+    SCREEN_COLUMN = 0x201
+    CURSOR_BACKGROUND = 0x202
+
+    no_arguments = { "FALSE", "TRUE", "OK",
+                     "CUT_STREAM", "RESUME_STREAM",
+                     "DROP_CONTENT",
+                     "DRAW_CURSOR",
+                     "SCREEN_COLUMN", "CURSOR_BACKGROUND",
+                   }
 
     type2names = {}
 
     def __repr__(self):
+        content = ""
         if self._type in self.type2names:
-            type = self.type2names[self._type]
+            _type = self.type2names[self._type]
+            if _type not in self.no_arguments:
+                content = ", " + repr(self.content)
         else:
-            type = hex(self._type)
-        return "event(" + type + ", " + repr(self.content) + ")"
+            _type = hex(self._type)
+            content = ", " + repr(self.content)
+        return "event(" + _type + content + ")"
 
     @classmethod
     def as_bool(cls, value: bool):

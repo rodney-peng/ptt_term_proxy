@@ -7,7 +7,7 @@ from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent, DrawClient
-from ptt_menu import PttMenu, SearchBoard, SearchBox, HelpScreen, ThreadInfo
+from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
 
 
 class ThreadOption(PttMenu):
@@ -24,6 +24,17 @@ class JumpToPosition(PttMenu):
         yield ProxyEvent.as_bool(
                  (lines[-2].startswith("跳至此行") or lines[-2].startswith("跳至此頁")) and \
                   lines[-1].strip() == '')
+
+
+class SearchThread(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        bg = yield ProxyEvent.cursor_background
+        assert bg is not None
+        yield ProxyEvent.ok
+        yield ProxyEvent.as_bool(bg == "white" and \
+                  (lines[-2].startswith("[搜尋]關鍵字:") or lines[-2].startswith("區分大小寫(Y/N/Q)?")))
 
 
 # a PTT thread being viewed
@@ -63,6 +74,8 @@ class PttThread(PttMenu):
         if url != self.url:
             self.url = url
             self.urlLine = 0
+            if self.viewedFirstLine and self.viewedLastLine:
+                self.scanFloor(self.viewedFirstLine, self.viewedLastLine)
 
     @classmethod
     def is_entered(cls, lines):
@@ -91,8 +104,10 @@ class PttThread(PttMenu):
 
         # re-enter to let the parent have the correct key
         yield ProxyEvent.cut_stream
-        yield ProxyEvent.event_to_server(ClientEvent.q)                 # to return to the board
-        self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)   # to re-enter the thread
+        yield ProxyEvent.event_to_server(ClientEvent.q)   # to return to the board
+        # to re-enter the thread once it exited
+        # don't yield directly as 'q' and 'r' almost arriving at the same time may confuse the server
+        self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
         self.setEnteringTrigger(ProxyEvent.resume_stream)
 
     def pre_update_pre_submenu(self, y, x, lines):
@@ -112,15 +127,14 @@ class PttThread(PttMenu):
     # switch to another thread
     def is_switch_event(self, event: ClientEvent):
         return (event == ClientEvent.Key_Up and self.atBegin) or \
-               (event == ClientEvent.Key_Down and self.atEnd) or \
-               (event == ClientEvent.Key_Right and self.atEnd) or \
+               (event in [ClientEvent.Key_Down, ClientEvent.Key_Right, ClientEvent.Enter] and self.atEnd) or \
                (chr(event) in "fb[]+-=Aa")
 
     subMenus = { ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
                  ClientEvent.o: ThreadOption,
                  ClientEvent.Q: ThreadInfo,
-                 ClientEvent.Slash: SearchBox,
+                 ClientEvent.Slash: SearchThread,
                  ClientEvent.Key1: JumpToPosition,
                  ClientEvent.Key2: JumpToPosition,
                  ClientEvent.Key3: JumpToPosition,
@@ -135,20 +149,27 @@ class PttThread(PttMenu):
                }
 
     def isSubMenuEntered(self, menu, lines):
-        # once in ThreadInfo, it exits to the board rather than the thread
-        # so it's useless to get the URL?
-        if menu is ThreadInfo and self.url is None:
+        # once in ThreadInfo, it exits to the board rather than the thread.
+        # we will get back to where we are in lets_do_subMenuExited().
+        if menu is ThreadInfo:
             url = None
-            for event in self.evaluate(menu.is_entered(lines)):
-                if event._type == ProxyEvent.THREAD_URL:
-                    url = event.content
-                else:
-                    yield event
+            lets_do_it = menu.is_entered(lines)
+            def catch_url(event):
+                nonlocal url
+                url = event.content
+            yield from self.evaluate(lets_do_it, {ProxyEvent.THREAD_URL: catch_url})
             if url: self.setURL(url)
-            print(self.prefix(), "URL:", url)
             yield ProxyEvent.as_bool(url is not None)
         else:
             yield from super().isSubMenuEntered(menu, lines)
+
+    def lets_do_subMenuExited(self, y, x, lines):
+        if isinstance(self.subMenu, ThreadInfo):
+            yield ProxyEvent.send_to_server(b'\r')   # back to the thread
+            if self.viewedFirstLine > 1:
+                # back to the position
+                yield ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine)
+        yield from super().lets_do_subMenuExited(y, x, lines)
 
     def post_update_is_self(self, y, x, lines):
         if self.clientEvent == ClientEvent.t:
@@ -228,7 +249,7 @@ class PttThread(PttMenu):
         if not self.urlLine: return
 
         columns = yield ProxyEvent.screen_column
-#        print(self.prefix(), "columns", columns)
+        assert columns is not None
         yield ProxyEvent.ok
         if columns < self.minColumns: return
 
@@ -247,7 +268,7 @@ class PttThread(PttMenu):
 #            print(self.prefix(), f"floor [{row:2}, {col:2}] = '{floor}'")
             yield ProxyEvent.draw_client(DrawClient(row, col, floor))
         if self.urlLine < lastLine:
-            yield ProxyEvent.draw_cursor            
+            yield ProxyEvent.draw_cursor
             self.viewedLastRow = lastRow    # confirms floor is in view
 
     def lets_do_clearFloor(self):
