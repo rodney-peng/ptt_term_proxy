@@ -29,22 +29,23 @@ class MyScreen(pyte.Screen):
         if ord(char) > 0xff:
             super().draw('')
 
-    def rawData(self, y, x, fg: str = "", bg: str = ""):
+    def rawData(self, y, x, fg: str = "", bg: str = "", bold: bool = False):
         data = self.buffer[y][x]
 #        print("rawData:", y, x, data)
         raw = data.data.encode("big5uao", 'replace')
-        if fg != data.fg or bg != data.bg:
+        if fg != data.fg or bg != data.bg or bold != data.bold:
             fgcode = self.fgCode(data.fg)
             bgcode = self.bgCode(data.bg)
-            raw = (b'\x1b[%d;%dm' % (fgcode, bgcode)) + raw
-        return raw, data.fg, data.bg
+            raw = (b'\x1b[%d;%d;%dm' % (1 if data.bold else 0, fgcode, bgcode)) + raw
+        return raw, data.fg, data.bg, data.bold
 
     def rawDataBlock(self, y, x, length):
-        fg = None
-        bg = None
+        fg = ""
+        bg = ""
+        bold = False
         data = b''
         for i in range(length):
-            raw, fg, bg = self.rawData(y, x + i, fg, bg)
+            raw, fg, bg, bold = self.rawData(y, x + i, fg, bg, bold)
             data += raw
         return data
 
@@ -244,7 +245,7 @@ class PttTerminal:
 
             fgcode = self.screen.fgCode(fg)
             bgcode = self.screen.bgCode(bg)
-            return (b'\x1b[%d;%dH' % (row, col)) + (b"\x1b[0;%d;%dm" % (fgcode, bgcode)) + content
+            return (b'\x1b[%d;%dH' % (row, col)) + (b"\x1b[%d;%d;%dm" % (1 if context.bold else 0, fgcode, bgcode)) + content
         else:
             return (b'\x1b[%d;%dH' % (row, col)) + content
 
@@ -270,7 +271,7 @@ class PttTerminal:
     vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
     xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
     def client_message(self, content):
-        print("\nclient:", content)
+#        print("terminal.client_message:", content)
 
         uncommitted = (len(content) > 1 and content[-1] == ord('\r'))
 
@@ -455,7 +456,7 @@ class PttTerminal:
                 yield from self.lets_do_terminal_event(lets_do_it, event)
 
     def server_message(self, content):
-        print("server: (%d)" % len(content))
+        print("terminal.server_message: (%d)" % len(content))
         self.feed(content)
         yield from self.post_server_message()
 

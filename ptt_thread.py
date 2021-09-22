@@ -51,23 +51,25 @@ class ProxyCommand(PttMenu):
     def enter(self, y, x, lines):
         yield from super().enter(y, x, lines)
 
+        yield ProxyEvent.cut_stream(0)
+
         self.input = ""
         self.screenData = yield ProxyEvent.req_screen_data(ClientContext(self.CommandRow, 1, length=self.CommandCol))
         yield ProxyEvent.ok
-        print("ProxyCommand: screen data", self.screenData)
 
         yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1, self.CommandPrompt, fg="white", bg="black"))
-        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8, " " * self.CommandMaxLen, fg="black", bg="green"))
+        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8, " " * self.CommandMaxLen, fg="white", bg="black", bold=True))
         yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8))
 
     def exit(self):
         yield from super().exit()
         yield ProxyEvent.send_to_client(self.screenData)
         yield ProxyEvent.draw_cursor
+        yield ProxyEvent.resume_stream
 
     def client_event(self, event: ClientEvent):
         yield from super().client_event(event)
-        yield ProxyEvent.drop_content
+#        yield ProxyEvent.drop_content
         if ClientEvent.isViewable(event):
             if len(self.input) < self.CommandMaxLen:
                 self.input += chr(event)
@@ -145,7 +147,7 @@ class PttThread(PttMenu):
         yield from super().switch(y, x, lines)
 
         # re-enter to let the parent have the correct key
-        yield ProxyEvent.cut_stream
+        yield ProxyEvent.cut_stream(2)
         yield ProxyEvent.event_to_server(ClientEvent.q)   # to return to the board
         # to re-enter the thread once it exited
         # don't yield directly as 'q' and 'r' almost arriving at the same time may confuse the server
@@ -227,7 +229,8 @@ class PttThread(PttMenu):
             yield ProxyEvent.send_to_server(b'\r')   # back to the thread
             if self.viewedFirstLine > 1:
                 # back to the position
-                yield ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine)
+                #yield ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine)
+                self.setEnteringTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
         yield from super().lets_do_subMenuExited(y, x, lines)
 
     def post_update_is_self(self, y, x, lines):

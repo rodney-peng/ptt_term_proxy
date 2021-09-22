@@ -67,6 +67,7 @@ class ClientContext:
     content: str = ""
     fg: str = None
     bg: str = None
+    bold: bool = False
     length: int = 0
 
 @dataclass
@@ -112,7 +113,7 @@ class ProxyEvent:
     REQ_SCREEN_DATA = 0x203
 
     no_arguments = { "FALSE", "TRUE", "OK",
-                     "CUT_STREAM", "RESUME_STREAM",
+                     "RESUME_STREAM",
                      "DROP_CONTENT",
                      "DRAW_CURSOR",
                      "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND",
@@ -165,7 +166,7 @@ class ProxyEvent:
 
 ProxyEvent.type2names = {getattr(ProxyEvent, name):name for name in dir(ProxyEvent) if 'A' <= name[0] <= 'Z'}
 
-# make shortcuts like: ProxyEvent.cut_stream = ProxyEvent(ProxyEvent.CUT_STREAM)
+# make shortcuts like: ProxyEvent.true = ProxyEvent(ProxyEvent.TRUE)
 for name in ProxyEvent.no_arguments:
     setattr(ProxyEvent, name.lower(), ProxyEvent(getattr(ProxyEvent, name)))
 
@@ -180,7 +181,7 @@ for name in ProxyEvent.type2names.values():
         # corret
         setattr(ProxyEvent, name.lower(), eval(f"lambda content: ProxyEvent(getattr(ProxyEvent, '{name}'), content)"))
 
-# 'return' is a keyword
+# 'return' is a keyword, "_return" as alternative
 ProxyEvent._return = lambda content: ProxyEvent(ProxyEvent.RETURN, content)
 
 @dataclass
@@ -194,7 +195,7 @@ ClientEvent = UserEvent
 
 if __name__ == "__main__":
     print(ProxyEvent.as_bool(True))
-    print(ProxyEvent.cut_stream)
+    print(ProxyEvent.cut_stream(100))
     print(ProxyEvent.replace_content(b'112233'))
     print(ProxyEvent._return("3434343"))
     print(ProxyEvent.true)

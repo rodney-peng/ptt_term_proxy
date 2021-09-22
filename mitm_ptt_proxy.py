@@ -135,7 +135,7 @@ class myDumpMaster(DumpMaster):
 
     def sendToServer(self, flow, data):
         assert isinstance(data, bytes)
-        print("sendToServer:", data)
+        print("main.sendToServer:", data)
         to_client = False
         is_text = False
         self.inject_websocket(flow, to_client, data, is_text)
@@ -144,7 +144,7 @@ class myDumpMaster(DumpMaster):
 
     def sendToClient(self, flow, data):
         assert isinstance(data, bytes)
-        print("sendToClient:", len(data))
+        print("main.sendToClient:", len(data))
         to_client = True
         is_text = False
         self.inject_websocket(flow, to_client, data, is_text)
