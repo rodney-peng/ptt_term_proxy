@@ -150,13 +150,18 @@ class myDumpMaster(DumpMaster):
         self.inject_websocket(flow, to_client, data, is_text)
         #self.commands.call("self-inject.websocket", flow, to_client, data, is_text)
 
-    def is_self_injected(self, flow_msg):
-        marklen = len(self.injected_mark)
-        if len(flow_msg.content) > marklen and flow_msg.content[:marklen] == self.injected_mark:
-            flow_msg.content = flow_msg.content[marklen:]
-#            print("self-injected, from_client:", flow_msg.from_client, len(flow_msg.content), flow_msg.timestamp)
-            return True
-        return False
+    @classmethod
+    def is_self_injected(cls, flow_msg):
+        marklen = len(cls.injected_mark)
+        return len(flow_msg.content) > marklen and flow_msg.content[:marklen] == cls.injected_mark
+
+    @classmethod
+    def self_injected_content(cls, flow_msg):
+        return flow_msg.content[len(cls.injected_mark):]
+
+    @classmethod
+    def strip_self_injected(cls, flow_msg):
+        flow_msg.content = flow_msg.content[len(cls.injected_mark):]
 
     # only applies to a WebsocketLayer in start state
     def websocketLayerStarted(self, wslayer: WebsocketLayer):
@@ -213,11 +218,13 @@ class myDumpMaster(DumpMaster):
                 pass
 
         delete_module('ptt_terminal')
+        delete_module('ptt_boardlist')
         delete_module('ptt_board')
         delete_module('ptt_thread')
         delete_module('ptt_menu')
         delete_module('ptt_event')
         delete_module('ptt_macro')
+        delete_module('ptt_macros')
 
         import glob
         for f in glob.glob("__pycache__/*"):

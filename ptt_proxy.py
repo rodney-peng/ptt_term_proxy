@@ -75,7 +75,7 @@ class PttFlow:
                 self.serverToClient = True
                 self.stream_resume_time = 0
             elif event._type == ProxyEvent.RUN_MACRO:
-                self.macro = getattr(ptt_macro, event.content)
+                self.macro = event.content
                 print("Run macro:", event.content)
             elif event._type == ProxyEvent.DROP_CONTENT:
                 evctx.dropContent = True
@@ -96,12 +96,14 @@ class PttFlow:
 
     def client_message(self, flow_msg):
         print('\n')
-        cut = not ctx.master.is_self_injected(flow_msg) and not self.clientToServer
-        # flow_msg.content will be altered in ctx.master.is_self_injected()
-        client_msg = flow_msg.content
-        if cut:
-#            print("proxy.client_message: cut", flow_msg.content)
-            flow_msg.content = b''
+        if ctx.master.is_self_injected(flow_msg):
+            ctx.master.strip_self_injected(flow_msg)
+            client_msg = flow_msg.content
+        else:
+            client_msg = flow_msg.content
+            if not self.clientToServer:
+#                print("proxy.client_message: cut", flow_msg.content)
+                flow_msg.content = b''
 
         lets_do_it = self.terminal.client_message(client_msg)
         evctx = self.EventContext()
@@ -233,8 +235,11 @@ class PttFlow:
 #        print("PttFlow.sendToClient:", data)
         ctx.master.sendToClient(self.flow, data)
 
-    def sendToServer(self, data: bytes):
-        self.msg_to_server.extend([i.to_bytes(1, "big") for i in data])
+    def sendToServer(self, data: bytes, per_byte: bool = True):
+        if per_byte:
+            self.msg_to_server.extend([i.to_bytes(1, "big") for i in data])    # ProxyEvent.SEND_TO_SERVER
+        else:
+            self.msg_to_server.append(data)    # from macro
         self.server_event.set()
 
     server_msg_interval = 0.25   # seconds
@@ -269,7 +274,11 @@ class PttFlow:
 
     # all messages, self-injected message still has mark
     def preview_message(self, flow_msg):
-#        if (not flow_msg.from_client): print("wsmsg to client:", len(flow_msg.content))
+        if (not flow_msg.from_client):
+            if ctx.master.is_self_injected(flow_msg):
+                print("wsmsg to client:", ctx.master.self_injected_content(flow_msg))
+            else:
+                print("wsmsg to client: (%d)" % len(flow_msg.content))
 
         if 0 < self.stream_resume_time < time.time():
             print("Maximum cut time exceeded, resume stream!!!", file=sys.stderr)
@@ -445,9 +454,10 @@ class PttProxy:
 
         self.pttFlows[flow].preview_message(flow_msg)
 
-        # message from client or injected to server will pass
-        # flow_msg.content will be altered in ctx.master.is_self_injected()
-        if (not flow_msg.from_client) and ctx.master.is_self_injected(flow_msg): return
+        # we are not interested in injected-to-client message, e.g. floor numbers.
+        if (not flow_msg.from_client) and ctx.master.is_self_injected(flow_msg):
+            ctx.master.strip_self_injected(flow_msg)
+            return
 
         self.pttFlows[flow].handle_message(flow_msg)
 

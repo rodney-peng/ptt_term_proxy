@@ -4,10 +4,8 @@ from typing import Union, List, Dict
 import asyncio
 import traceback
 
-from ptt_menu import PttMenu, SearchBoard, QuickSwitch
-from ptt_terminal import BoardList
-from ptt_board import PttBoard
-from ptt_thread import PttThread, ThreadOption
+from ptt_menu import PttMenu
+
 
 @dataclass
 class MacroContext:
@@ -77,13 +75,13 @@ class PttMacro:
         error = None
         while not done and error is None:
             if ctx.resend:
-                sendToServer(ctx.resend)
+                sendToServer(ctx.resend, False)
             elif isinstance(self.send, bytes):
-                sendToServer(self.send)
+                sendToServer(self.send, False)
             else:
                 state = terminal.currentState()
                 if state in self.send:
-                    sendToServer(self.send[state])
+                    sendToServer(self.send[state], False)
                 elif terminal.verifyState(self.to_state):
                     done = True
                     break
@@ -135,56 +133,4 @@ class PttMacro:
         ctx.last_state = self.to_state
         return True if done else error
 
-OnBoardingScreen = None
-FromLastState = []
-
-macros_pmore_config = [
-    # searching a hot-board in hot-board list will only move cursor but not jump to the board?
-    PttMacro( [BoardList],   b's', [SearchBoard] ),
-    # no onboarding screen if jumps from searching in a board?
-    PttMacro( FromLastState, b'pttnewhand\r', [BoardList, OnBoardingScreen, PttBoard] ),
-    # if in onboarding screen, skips
-    PttMacro( FromLastState, {BoardList: b'\r', OnBoardingScreen: b'\x1b[A'}, [PttBoard] ),
-    # if enters the board from board list, onboarding screen will be in [PttBoard] state,
-    # send an 'Up' to skip the onboarding screen
-    PttMacro( FromLastState, b'\x1b[A', [PttBoard] ),
-    # enters the thread at cursor or retry after page up if the thread has been deleted
-    PttMacro( FromLastState, b'\r', [PttThread, PttBoard], timeout=True, resend=b'\x1b[5~', retry=5 ),
-    PttMacro( [PttThread],   b'o',      [ThreadOption] ),    # enters browser configuration
-    PttMacro( FromLastState, b'm',      [ThreadOption], row=-5, pattern='\*顯示', retry=3 ),   # 斷行符號: 顯示
-    PttMacro( FromLastState, b'l',      [ThreadOption], row=-4, pattern='\*無',   retry=3 ),   # 文章標頭分隔線: 無
-    PttMacro( FromLastState, b' ',      [PttThread] ),    # ends config
-    PttMacro( FromLastState, b'\x1b[D', [PttBoard] ),     # Left and exits the thread
-    PttMacro( FromLastState, b'\x1a',   [QuickSwitch] ),  # Ctrl-Z brings up quick switch menu
-    PttMacro( FromLastState, b't',      [BoardList] ),    # goes to 熱門看板
-    ]
-
-if __name__ == "__main__":
-    ctx = MacroContext(asyncio.Event(), 1.0)
-
-    def sendToServer(data):
-        print("Send:", data)
-        ctx.event.set()
-
-    class Terminal:
-        def currentState(self):
-            return None
-
-        def verifyState(self, state):
-            return True
-
-        def verifyRow(self, row, pattern):
-            return True
-
-    async def run_macro(macros):
-        terminal = Terminal()
-        for m in macros:
-            print(m)
-            status = await m.run(sendToServer, terminal, ctx)
-            if isinstance(status, str):
-                print(status)
-            if status is not True:
-                break
-
-    asyncio.run(run_macro(macros_pmore_config))
 

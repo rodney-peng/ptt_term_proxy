@@ -101,7 +101,8 @@ class ProxyEvent:
     RETURN = 0x101      # menu return
     BOARD_NAME = 0x102
     THREAD_URL = 0x103
-    RUN_MACRO = 0x104
+    BAN_FLOOR = 0x104
+    RUN_MACRO = 0x105
 
     DRAW_CLIENT = 0x106
     DRAW_CURSOR = 0x107

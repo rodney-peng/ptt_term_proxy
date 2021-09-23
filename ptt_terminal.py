@@ -13,7 +13,7 @@ from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent, ClientContext
-from ptt_menu import PttMenu, QuickSwitch, SearchBoard, SearchBox, HelpScreen, JumpToEntry
+from ptt_boardlist import PttBoardList
 from ptt_board import PttBoard
 
 # fix for double-byte character positioning and drawing
@@ -70,77 +70,6 @@ class MyDebugStream(pyte.DebugStream):
         super(pyte.ByteStream, self).feed(chars)
 
 
-class BoardList(PttMenu):
-
-    @staticmethod
-    def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[0].lstrip().startswith("【看板列表】") and lines[-1].lstrip().startswith("選擇看板"))
-
-    def reset(self):
-        super().reset()
-        self.boards = {}
-
-    def add(self, name, board):
-        self.boards[name] = board
-
-    def is_empty(self):
-        return len(self.boards) == 0
-
-    def enter(self, y, x, lines):
-        yield from super().enter(y, x, lines)
-        if lines[y].startswith('>'):
-            self.cursorLine = lines[y]
-            print(self.prefix(), lines[y])
-        else:
-            self.cursorLine = ""
-
-    def pre_update_self(self, y, x, lines):
-        self.cursorLine = lines[y]
-        yield from super().pre_update_self(y, x, lines)
-
-    subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
-                 ClientEvent.Ctrl_S: SearchBoard,
-                 ClientEvent.s: SearchBoard,
-                 ClientEvent.h: HelpScreen,
-                 ClientEvent.Slash: SearchBox,
-                 ClientEvent.Enter:     PttBoard,
-                 ClientEvent.Key_Right: PttBoard,
-                 ClientEvent.l:         PttBoard,
-                 ClientEvent.r:         PttBoard,
-                 ClientEvent.Key1: JumpToEntry,
-                 ClientEvent.Key2: JumpToEntry,
-                 ClientEvent.Key3: JumpToEntry,
-                 ClientEvent.Key4: JumpToEntry,
-                 ClientEvent.Key5: JumpToEntry,
-                 ClientEvent.Key6: JumpToEntry,
-                 ClientEvent.Key7: JumpToEntry,
-                 ClientEvent.Key8: JumpToEntry,
-                 ClientEvent.Key9: JumpToEntry,
-               }
-
-    def isSubMenuEntered(self, menu, lines):
-        if menu is PttBoard:
-            print(self.prefix(), "isSubMenuEntered", lines[-1])
-            if "請按任意鍵繼續" in lines[-1] or "動畫播放中" in lines[-1]:
-                print(self.prefix(), "isSubMenuEntered", self.cursorLine)
-                board = re.match("[> ]+[0-9]+[ ˇ]+([\w-]+)", self.cursorLine)
-                if board: board = board.group(1)
-            else:
-                board = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.BOARD_NAME)
-            if board:
-                if board not in self.boards:
-                    self.boards[board] = PttBoard(board)
-                self.subMenu = self.boards[board]
-            yield ProxyEvent.as_bool(board is not None)
-        else:
-            yield from super().isSubMenuEntered(menu, lines)
-
-    def post_update_self(self, returnFromSubMenu, y, x, lines):
-        if lines[y].startswith('>'):
-            self.cursorLine = lines[y]
-            print(self.prefix(), "post_update_self", lines[y])
-        if False: yield
-
 @dataclass
 class NotificationRendition:
     width: int = 0
@@ -162,8 +91,8 @@ class PttTerminal:
 
     def reset(self):
         self.clientEvent = ClientEvent.Unknown
-        self.menu = None    # BoardList or PttBoard
-        self.boardlist = BoardList()
+        self.menu = None    # PttBoardList or PttBoard
+        self.boardlist = PttBoardList()
 
     # screen and stream operations
 
@@ -227,7 +156,7 @@ class PttTerminal:
         blink = rendition.blink if rendition else False
 
         fgcode = self.screen.fgCode(fg)
-        bgcode = self.screen.fgCode(bg)
+        bgcode = self.screen.bgCode(bg)
         return b"\x1b[" + (b'5;' if blink else b'') + b"%d;%dm" % (fgcode, bgcode)
 
     def draw(self, context: ClientContext):
@@ -439,10 +368,11 @@ class PttTerminal:
                     yield from self.lets_do_terminal_event(lets_do_it, event)
             if self.menu: return
 
-        in_boardlist = ProxyEvent.eval_bool(BoardList.is_entered(lines))
+        in_boardlist = ProxyEvent.eval_bool(PttBoardList.is_entered(lines))
         if in_boardlist:
-#            if self.boardlist.is_empty():
-#                yield ProxyEvent.run_macro("macros_pmore_config")
+            if self.boardlist.is_empty():
+                from ptt_macros import pmore_config
+                yield ProxyEvent.run_macro(pmore_config)
             self.menu = self.boardlist
         else:
             board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)

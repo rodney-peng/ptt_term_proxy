@@ -56,6 +56,38 @@ class PttMenuTemplate:
     def to_be_resumed(self):
         return self.resume_event
 
+    def lets_do_if_return(self, lets_do_it, lets_do_return, watched={}):
+        class Confirm:
+            def __init__(self):
+                self.confirmed = False
+            def __call__(self, event):
+                self.confirmed = True
+            def __bool__(self):
+                return self.confirmed
+        returned = Confirm()
+        to_watch = {ProxyEvent.RETURN: returned}
+        to_watch.update(watched)
+        yield from self.evaluate(lets_do_it, to_watch)
+        if returned: yield from self.evaluate(lets_do_return, watched)
+
+    def lets_do_if(self, lets_do_it, lets_do_yes = None, lets_do_no = None, watched={}):
+        class YesNo:
+            def __init__(self):
+                self.confirmed = None
+            def __call__(self, event):
+                self.confirmed = (event._type == ProxyEvent.TRUE)
+            def __bool__(self):
+                assert self.confirmed is not None
+                return self.confirmed
+        confirmed = YesNo()
+        to_watch = {ProxyEvent.TRUE: confirmed, ProxyEvent.FALSE: confirmed}
+        to_watch.update(watched)
+        yield from self.evaluate(lets_do_it, to_watch)
+        if confirmed:
+            if lets_do_yes: yield from self.evaluate(lets_do_yes, watched)
+        else:
+            if lets_do_no: yield from self.evaluate(lets_do_no, watched)
+
     # handling forward of terminal requests
     def evaluate(self, lets_do_it, watched={}):
         for event in lets_do_it:
@@ -65,7 +97,11 @@ class PttMenuTemplate:
                     yield from handler
                 elif callable(handler):
                     event = handler(event)
-                    if event is not None: yield event
+                    if event is not None:
+                        if inspect.isgenerator(event):
+                            yield from event
+                        else:
+                            yield event
                 else:
                     yield handler
             elif event._type > ProxyEvent.TERMINAL_REQUEST:
@@ -99,16 +135,9 @@ class PttMenu(PttMenuTemplate, ABC):
 
     def pre_update_submenu(self, y, x, lines):
         assert self.subMenu is not None
-
-        quitMenu = False
-        def quit_menu(event):
-            nonlocal quitMenu
-            quitMenu = True
-        lets_do_it = self.subMenu.pre_update(y, x, lines)
-        yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
-
-        if quitMenu:
-            yield from self.lets_do_subMenuExited(y, x, lines)
+        lets_do_update =  self.subMenu.pre_update(y, x, lines)
+        lets_do_exit = self.lets_do_subMenuExited(y, x, lines)
+        yield from self.lets_do_if_return(lets_do_update, lets_do_exit)
 
     def pre_update_pre_submenu(self, y, x, lines):
         if False: yield
@@ -158,17 +187,9 @@ class PttMenu(PttMenuTemplate, ABC):
 
     def post_update_is_submenu(self, y, x, lines):
         assert self.subMenu is None
-
         if self.clientEvent in getattr(self, "subMenus", {}):
-            entered = False
-            def catch_bool(event):
-                nonlocal entered
-                entered = (event._type == ProxyEvent.TRUE)
             menu = self.subMenus[self.clientEvent]
-            lets_do_it = self.isSubMenuEntered(menu, lines)
-            yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
-            if entered:
-                yield from self.lets_do_new_subMenu(menu, y, x, lines)
+            yield from self.lets_do_if(self.isSubMenuEntered(menu, lines), lets_do_yes = self.lets_do_new_subMenu(menu, y, x, lines))
 
     # at this point, self state is still unknown.
     # e.g. searching board in a thread could jump to another board without returning to the parent.
@@ -179,29 +200,13 @@ class PttMenu(PttMenuTemplate, ABC):
 
     def post_update_submenu(self, y, x, lines):
         assert self.subMenu is not None
-
-        quitMenu = False
-        def quit_menu(event):
-            nonlocal quitMenu
-            quitMenu = True
-        lets_do_it = self.subMenu.post_update(y, x, lines)
-        yield from self.evaluate(lets_do_it, {ProxyEvent.RETURN: quit_menu})
-
-        if quitMenu:
-            yield from self.lets_do_subMenuExited(y, x, lines)
+        lets_do_update = self.subMenu.post_update(y, x, lines)
+        lets_do_exit = self.lets_do_subMenuExited(y, x, lines)
+        yield from self.lets_do_if_return(lets_do_update, lets_do_exit)
 
     def post_update_is_self(self, y, x, lines):
         assert self.subMenu is None
-
-        entered = None
-        def catch_bool(event):
-            nonlocal entered
-            entered = (event._type == ProxyEvent.TRUE)
-        lets_do_it = self.is_entered(lines)
-        yield from self.evaluate(lets_do_it, {ProxyEvent.TRUE: catch_bool, ProxyEvent.FALSE: catch_bool})
-        assert entered is not None
-
-        if not entered: yield from self.exit()
+        yield from self.lets_do_if(self.is_entered(lines), lets_do_no = self.exit())
 
     # TODO: Is returnFromSubMenu still necessary?
     def post_update_self(self, returnFromSubMenu, y, x, lines):
@@ -280,7 +285,7 @@ class QuickSwitch(PttMenu):
 
     @staticmethod
     def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[-1].startswith(" ★快速切換:"))
+        yield ProxyEvent.as_bool(lines[-1].strip().startswith("★快速切換:"))
 
 
 class JumpToEntry(PttMenu):
