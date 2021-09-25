@@ -154,6 +154,10 @@ class PttFlow:
         firstSegment = not self.msg_to_terminal
         lastSegment  = len(flow_msg.content) < 1021
 
+        if not lastSegment and flow_msg.content[-16:].decode("utf-8", "ignore").endswith("\x1b[%d;%dH" % self.terminal.size()):
+            print("proxy.server_message: force purging", len(flow_msg.content))
+            lastSegment = True
+
         if firstSegment:
             lets_do_it = self.terminal.pre_server_message()
             for event in self.terminal_events(lets_do_it, evctx):

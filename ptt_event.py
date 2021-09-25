@@ -62,9 +62,9 @@ for a in range(ord('a'), ord('z')+1):
 
 @dataclass
 class ClientContext:
-    row: int
-    column: int
-    content: str = ""
+    row: int = None
+    column: int = None
+    content: str = ''
     fg: str = None
     bg: str = None
     bold: bool = False
@@ -102,10 +102,15 @@ class ProxyEvent:
     BOARD_NAME = 0x102
     THREAD_URL = 0x103
     BAN_FLOOR = 0x104
-    RUN_MACRO = 0x105
+    UNBAN_FLOOR = 0x105
+    BANNED_LINE = 0x106
+    SET_GROUND = 0x107
+    GET_GROUND = 0x108
 
-    DRAW_CLIENT = 0x106
-    DRAW_CURSOR = 0x107
+    RUN_MACRO = 0x180
+    DRAW_CLIENT = 0x181
+    DRAW_CURSOR = 0x182
+    RESET_RENDITION = 0x183
 
     # terminal requests, needs to be forwarded along the generator-chain
     TERMINAL_REQUEST = 0x200
@@ -116,7 +121,8 @@ class ProxyEvent:
     no_arguments = { "FALSE", "TRUE", "OK",
                      "RESUME_STREAM",
                      "DROP_CONTENT",
-                     "DRAW_CURSOR",
+                     "GET_GROUND",
+                     "DRAW_CURSOR", "RESET_RENDITION",
                      "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND",
                    }
 

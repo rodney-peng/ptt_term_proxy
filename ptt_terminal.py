@@ -96,6 +96,9 @@ class PttTerminal:
 
     # screen and stream operations
 
+    def size(self):
+        return self.screen.size
+
     def resize(self, columns, lines):
         self.screen.resize(lines, columns)
 
@@ -162,21 +165,24 @@ class PttTerminal:
     def draw(self, context: ClientContext):
         row = context.row
         col = context.column
+        position = b''
+        rendition = b''
         content = context.content.encode("big5uao", "replace")
-        if row < 0: row = self.screen.lines + row + 1
-        row = 1 if row < 1 else min(self.screen.lines, row)
-        if col < 0: col = self.screen.columns + col + 1
-        col = 1 if col < 1 else min(self.screen.columns, col)
-        content = content[:self.screen.columns - col + 1]
+        if row is not None and col is not None:
+            if row < 0: row = self.screen.lines + row + 1
+            row = 1 if row < 1 else min(self.screen.lines, row)
+            if col < 0: col = self.screen.columns + col + 1
+            col = 1 if col < 1 else min(self.screen.columns, col)
+            position = b'\x1b[%d;%dH' % (row, col)
+            content = content[:self.screen.columns - col + 1]
         if context.fg or context.bg:
             fg = context.fg if context.fg else "white"
             bg = context.bg if context.bg else "black"
 
             fgcode = self.screen.fgCode(fg)
             bgcode = self.screen.bgCode(bg)
-            return (b'\x1b[%d;%dH' % (row, col)) + (b"\x1b[%d;%d;%dm" % (1 if context.bold else 0, fgcode, bgcode)) + content
-        else:
-            return (b'\x1b[%d;%dH' % (row, col)) + content
+            rendition = b"\x1b[%d;%d;%dm" % (1 if context.bold else 0, fgcode, bgcode)
+        return position + rendition + content
 
     def screenData(self, context: ClientContext):
         row = context.row
@@ -407,6 +413,9 @@ class PttTerminal:
             yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
         elif event._type == ProxyEvent.DRAW_CURSOR:
             data = self.cursor_position()
+            yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+        elif event._type == ProxyEvent.RESET_RENDITION:
+            data = self.selectGraphic()
             yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
         else:
             yield ProxyEvent.warning(event)

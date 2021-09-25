@@ -1,4 +1,5 @@
 import re
+import time
 
 from ptt_event import ProxyEvent, ClientEvent
 from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry
@@ -31,6 +32,9 @@ class PttBoard(PttMenu):
         self.onboarding = False
         self.threads = {}
 
+        self.firstViewed = self.lastViewed = 0  # Epoch time
+        self.elapsedTime = 0  # in seconds
+
     @staticmethod
     def is_entered(lines, board=None):
         # In '系列' only displays the first thread for a series
@@ -42,6 +46,9 @@ class PttBoard(PttMenu):
             yield ProxyEvent.as_bool(False)
 
     def enter(self, y, x, lines):
+        self.enteredTime = time.time()
+        if not self.firstViewed: self.firstViewed = self.enteredTime
+
         yield from super().enter(y, x, lines)
         self.cursorLine = ""
 
@@ -50,6 +57,12 @@ class PttBoard(PttMenu):
         elif lines[y].startswith('>'):
             self.cursorLine = lines[y]
             print(self.prefix(), lines[y])
+
+    def exit(self):
+        self.lastViewed = time.time()
+        elapsed = int(self.lastViewed - self.enteredTime)
+        if elapsed > 0: self.elapsedTime += elapsed
+        yield from super().exit()
 
     def pre_update(self, y, x, lines):
         if not self.onboarding:
@@ -61,7 +74,7 @@ class PttBoard(PttMenu):
         if not self.onboarding:
             yield from super().post_update(y, x, lines)
 
-    def makeThread(self, line):
+    def makeThread(self, line, thread = None):
         if '★' in line[:6]:
             prefix = "******"
             line = line[6:]
@@ -75,8 +88,14 @@ class PttBoard(PttMenu):
             line = line[4:]
 
         key = prefix + line.rstrip()
-        print(f"thread = '{key}'")
-        if key not in self.threads:
+        print(f"makeThread = '{key}' {thread}")
+        if thread:
+            if key in self.threads:
+                self.threads[key].transfer(thread)
+            else:
+                thread.setKey(key)
+                self.threads[key] = thread
+        elif key not in self.threads:
             self.threads[key] = PttThread(self, key)
         return self.threads[key]
 
@@ -124,14 +143,21 @@ class PttBoard(PttMenu):
             yield from super().isSubMenuEntered(menu, lines)
 
     def makeSubMenu(self, menu):
-        if menu is PttThread:
-            print(self.prefix(), "makeSubMenu", self.cursorLine)
+        if hasattr(self, "resumingSubMenu") and isinstance(self.resumingSubMenu, menu):
+            subMenu = self.resumingSubMenu
+            del self.resumingSubMenu
+            if isinstance(subMenu, PttThread):
+                return self.makeThread(self.cursorLine, subMenu)
+            else:
+                return subMenu
+        elif menu is PttThread:
             return self.makeThread(self.cursorLine)
         else:
             return super().makeSubMenu(menu)
 
     def lets_do_subMenuExited(self, y, x, lines):
         resume_event = self.subMenu.to_be_resumed()
+        if resume_event: self.resumingSubMenu = self.subMenu
         yield from super().lets_do_subMenuExited(y, x, lines)
         if resume_event: yield resume_event
 

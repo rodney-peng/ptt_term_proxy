@@ -97,12 +97,11 @@ class PttMenuTemplate:
                     yield from handler
                 elif callable(handler):
                     event = handler(event)
-                    if event is not None:
-                        if inspect.isgenerator(event):
-                            yield from event
-                        else:
-                            yield event
-                else:
+                    if inspect.isgenerator(event):
+                        yield from event
+                    elif event is not None:
+                        yield event
+                elif handler is not None:
                     yield handler
             elif event._type > ProxyEvent.TERMINAL_REQUEST:
                 response = yield event
