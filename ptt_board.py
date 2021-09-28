@@ -20,6 +20,44 @@ class OnboardingScreen(PttMenu):
         yield ProxyEvent.as_bool("動畫播放中" in lines[-1] or "請按任意鍵繼續" in lines[-1])
 
 
+class PostThread(PttMenu):
+
+    class PostHelp(PttMenu):
+
+        @staticmethod
+        def is_entered(lines):
+            yield ProxyEvent.as_bool(re.match("瀏覽\s.+離開$", lines[-1].strip()) is not None)
+
+        subMenus = { ClientEvent.h: HelpScreen }
+
+    class PostTemplate(PttMenu):
+
+        @staticmethod
+        def is_entered(lines):
+            yield ProxyEvent.as_bool(lines[-1].lstrip().startswith("【功能鍵】"))
+
+        subMenus = { ClientEvent.h: HelpScreen }
+
+    @staticmethod
+    def is_entered(lines):
+        def is_new_thread_screen(lines):
+            for line in range(len(lines)-4, -1, -1):
+                if lines[line].lstrip().startswith("發表文章") and lines[line+2].lstrip().startswith("種類：1.問題"):
+                    return True
+            return False
+
+        bg = yield ProxyEvent.req_cursor_background
+        assert bg is not None
+        yield ProxyEvent.ok
+
+        yield ProxyEvent.as_bool((bg == "white" and (is_new_thread_screen(lines) or lines[2].startswith("確定要儲存檔案嗎？"))) or \
+                  lines[-1].lstrip().startswith("編輯文章") or \
+                  lines[-1].lstrip().startswith("◆ 結束但不儲存 [y/N]?") )
+
+    subMenus = { ClientEvent.Ctrl_Z: PostHelp,
+                 ClientEvent.Ctrl_G: PostTemplate }
+
+
 class PttBoard(PttMenu):
 
     def __init__(self, name):
@@ -74,7 +112,7 @@ class PttBoard(PttMenu):
         if not self.onboarding:
             yield from super().post_update(y, x, lines)
 
-    def makeThread(self, line, thread = None):
+    def makeThread(self, line, cached, thread = None):
         if '★' in line[:6]:
             prefix = "******"
             line = line[6:]
@@ -88,16 +126,17 @@ class PttBoard(PttMenu):
             line = line[4:]
 
         key = prefix + line.rstrip()
-        print(f"makeThread = '{key}' {thread}")
-        if thread:
-            if key in self.threads:
-                self.threads[key].transfer(thread)
-            else:
+        print(f"makeThread = '{key}' {thread} {key in self.threads}")
+        if key in self.threads:
+            if thread: self.threads[key].transfer(thread)
+            thread = self.threads[key]
+        else:
+            if thread:
                 thread.setKey(key)
-                self.threads[key] = thread
-        elif key not in self.threads:
-            self.threads[key] = PttThread(self, key)
-        return self.threads[key]
+            else:
+                thread = PttThread(self, key)
+            if cached: self.threads[key] = thread
+        return thread
 
     def pre_update_self(self, y, x, lines):
         self.cursorLine = lines[y]
@@ -117,6 +156,7 @@ class PttBoard(PttMenu):
                  ClientEvent.Z: SearchBox,
                  ClientEvent.G: SearchBox,
                  ClientEvent.A: SearchBox,
+                 ClientEvent.Ctrl_P: PostThread,
                  ClientEvent.Enter:     PttThread,
                  ClientEvent.Key_Right: PttThread,
                  ClientEvent.l:         PttThread,
@@ -136,24 +176,32 @@ class PttBoard(PttMenu):
     def isSubMenuEntered(self, menu, lines):
         if menu is ThreadInfo:
             url = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.THREAD_URL)
-            if url: self.makeSubMenu(PttThread).setURL(url)
+            if url:
+                cached = yield ProxyEvent.req_submenu_cached
+                assert cached is not None
+                yield ProxyEvent.ok
+
+                self.makeThread(self.cursorLine, cached).setURL(url)
             print(self.prefix(), "URL:", url)
             yield ProxyEvent.as_bool(url is not None)
         else:
             yield from super().isSubMenuEntered(menu, lines)
 
     def makeSubMenu(self, menu):
+        if menu is PttThread:
+            cached = yield ProxyEvent.req_submenu_cached
+            assert cached is not None
+            yield ProxyEvent.ok
+
         if hasattr(self, "resumingSubMenu") and isinstance(self.resumingSubMenu, menu):
-            subMenu = self.resumingSubMenu
+            self.subMenu = self.resumingSubMenu
             del self.resumingSubMenu
-            if isinstance(subMenu, PttThread):
-                return self.makeThread(self.cursorLine, subMenu)
-            else:
-                return subMenu
+            if menu is PttThread:
+                self.subMenu = self.makeThread(self.cursorLine, cached, self.subMenu)
         elif menu is PttThread:
-            return self.makeThread(self.cursorLine)
+            self.subMenu = self.makeThread(self.cursorLine, cached)
         else:
-            return super().makeSubMenu(menu)
+            yield from super().makeSubMenu(menu)
 
     def lets_do_subMenuExited(self, y, x, lines):
         resume_event = self.subMenu.to_be_resumed()
@@ -178,11 +226,6 @@ class PttBoard(PttMenu):
             print(self.prefix(), "post_update_self", lines[y])
         if False: yield
 
-    def is_cursor_moved(self):
-        print(self.prefix(), "is_cursor_moved", ClientEvent.name(self.clientEvent))
-        return self.clientEvent in [ClientEvent.Key_Up, ClientEvent.Key_Down, ClientEvent.Key_PgUp, ClientEvent.Key_PgDn,
-                                    ClientEvent.Key_Home, ClientEvent.Key_End, ClientEvent.Ctrl_B, ClientEvent.Ctrl_F] or \
-               chr(self.clientEvent) in "pknjPN$=[]<>-+S{}"
 
 if __name__ == "__main__":
     from ptt_menu import test

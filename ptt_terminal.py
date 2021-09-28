@@ -91,8 +91,9 @@ class PttTerminal:
 
     def reset(self):
         self.clientEvent = ClientEvent.Unknown
-        self.menu = None    # PttBoardList or PttBoard
+        self.menu = None    # PttBoardList
         self.boardlist = PttBoardList()
+        self.initialized = False
 
     # screen and stream operations
 
@@ -365,31 +366,30 @@ class PttTerminal:
         y, x, line = self.cursor()
         lines = self.screen.display
         if self.menu:
-            lets_do_it = self.menu.post_update(y, x, lines)
-            for event in lets_do_it:
-                if event._type == ProxyEvent.RETURN:
-                    print("terminal: exit", self.menu)
-                    self.menu = None
-                else:
-                    yield from self.lets_do_terminal_event(lets_do_it, event)
+            def exited(menu):
+                print("terminal:", menu, "exited")
+                self.menu = None
+                if False: yield
+
+            lets_do_it1 = self.menu.post_update(y, x, lines)
+            lets_do_it2 = self.menu.lets_do_if_return(lets_do_it1, exited(self.menu))
+            for event in lets_do_it2:
+                yield from self.lets_do_terminal_event(lets_do_it2, event)
             if self.menu: return
 
-        in_boardlist = ProxyEvent.eval_bool(PttBoardList.is_entered(lines))
-        if in_boardlist:
-            if self.boardlist.is_empty():
+        def entered(menu):
+            print("terminal:", menu, "entered")
+            self.menu = menu
+            yield from self.menu.enter(y, x, lines)
+            if not self.initialized:
                 from ptt_macros import pmore_config
                 yield ProxyEvent.run_macro(pmore_config)
-            self.menu = self.boardlist
-        else:
-            board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
-            if board:
-                self.menu = PttBoard(board)
-                self.boardlist.add(board, self.menu)
+                self.initialized = True
 
-        if self.menu:
-            lets_do_it = self.menu.enter(y, x, lines)
-            for event in lets_do_it:
-                yield from self.lets_do_terminal_event(lets_do_it, event)
+        lets_do_it1 = self.boardlist.is_entered(lines)
+        lets_do_it2 = self.boardlist.lets_do_if(lets_do_it1, entered(self.boardlist))
+        for event in lets_do_it2:
+            yield from self.lets_do_terminal_event(lets_do_it2, event)
 
     def server_message(self, content):
         print("terminal.server_message: (%d)" % len(content))
@@ -407,6 +407,10 @@ class PttTerminal:
             # event.content is a ptt_event.ClientContext object
             data = self.screenData(event.content)
             lets_do_it.send(data)
+        elif event._type == ProxyEvent.REQ_SUBMENU_CACHED:
+            response = yield event
+            reply = lets_do_it.send(response)
+            yield reply
         elif event._type == ProxyEvent.DRAW_CLIENT:
             # event.content is a ptt_event.ClientContext object
             data = self.draw(event.content)

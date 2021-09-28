@@ -9,7 +9,7 @@ FromLastState = []
 
 pmore_config = [
     # searching a hot-board in hot-board list will only move cursor but not jump to the board?
-    PttMacro( [PttBoardList],   b's', [SearchBoard] ),
+    PttMacro( [PttBoardList, PttBoard],   b's', [SearchBoard] ),
     # no onboarding screen if jumps from searching in a board?
     PttMacro( FromLastState, b'pttnewhand\r', [PttBoardList, OnBoardingScreen, PttBoard] ),
     # if in onboarding screen, skips

@@ -9,21 +9,35 @@ from ptt_board import PttBoard
 
 class PttBoardList(PttMenu):
 
-    @staticmethod
-    def is_entered(lines):
-        yield ProxyEvent.as_bool(lines[0].lstrip().startswith("【看板列表】") and lines[-1].lstrip().startswith("選擇看板"))
-
     def reset(self):
         super().reset()
         self.boards = {}
 
-    def add(self, name, board):
-        self.boards[name] = board
+    def is_entered(self, lines):
+        entered = lines[0].lstrip().startswith("【看板列表】") and lines[-1].lstrip().startswith("選擇看板")
+        if not entered and self.subMenu is None:
+            board = ProxyEvent.eval_type(PttBoard.is_entered(lines), ProxyEvent.BOARD_NAME)
+            if board:
+                if board in self.boards:
+                    self.subMenu = self.boards[board]
+                else:
+                    self.subMenu = PttBoard(board)
 
-    def is_empty(self):
-        return len(self.boards) == 0
+                    cached = yield ProxyEvent.req_submenu_cached
+                    assert cached is not None
+                    yield ProxyEvent.ok
+                    if cached: self.boards[board] = self.subMenu
+
+                entered = True
+
+        yield ProxyEvent.as_bool(entered)
 
     def enter(self, y, x, lines):
+        if self.subMenu:
+            yield from super().enter(0, 0, [' '])
+            yield from self.lets_do_new_subMenu(PttBoard, y, x, lines)
+            return
+
         yield from super().enter(y, x, lines)
         if lines[y].startswith('>'):
             self.cursorLine = lines[y]
@@ -63,12 +77,25 @@ class PttBoardList(PttMenu):
             else:
                 board = ProxyEvent.eval_type(menu.is_entered(lines), ProxyEvent.BOARD_NAME)
             if board:
-                if board not in self.boards:
-                    self.boards[board] = PttBoard(board)
-                self.subMenu = self.boards[board]
+                if board in self.boards:
+                    self.subMenu = self.boards[board]
+                else:
+                    cached = yield ProxyEvent.req_submenu_cached
+                    assert cached is not None
+                    yield ProxyEvent.ok
+
+                    self.subMenu = PttBoard(board)
+                    if cached: self.boards[board] = self.subMenu
             yield ProxyEvent.as_bool(board is not None)
         else:
             yield from super().isSubMenuEntered(menu, lines)
+
+    def post_update_is_self(self, y, x, lines):
+        lets_do_it = self.is_entered(lines)
+        def lets_do_yes():
+            if self.subMenu: yield from self.lets_do_new_subMenu(PttBoard, y, x, lines)
+        lets_do_no = self.exit()
+        yield from self.lets_do_if(lets_do_it, lets_do_yes(), lets_do_no)
 
     def post_update_self(self, returnFromSubMenu, y, x, lines):
         if lines[y].startswith('>'):

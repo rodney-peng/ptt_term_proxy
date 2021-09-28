@@ -124,7 +124,6 @@ class PttMenu(PttMenuTemplate, ABC):
     def reset(self):
         super().reset()
         self.subMenu = None
-        self.__subMenuExited = False
 
     def client_event(self, event: ClientEvent):
         if self.subMenu:
@@ -148,6 +147,7 @@ class PttMenu(PttMenuTemplate, ABC):
         if False: yield
 
     def pre_update(self, y, x, lines):
+        self.__pre_updated = True
         self.__subMenuExited = False
         if self.subMenu:
             yield from self.pre_update_submenu(y, x, lines)
@@ -170,7 +170,8 @@ class PttMenu(PttMenuTemplate, ABC):
         yield from menu.is_entered(lines)
 
     def makeSubMenu(self, menu):
-        return menu()
+        self.subMenu = menu()
+        if False: yield
 
     def subMenuEntered(self):
         # to prevent the event matches subMenus again once returned
@@ -179,7 +180,7 @@ class PttMenu(PttMenuTemplate, ABC):
 
     def lets_do_new_subMenu(self, menu, y, x, lines):
         if self.subMenu is None:
-            self.subMenu = self.makeSubMenu(menu)
+            yield from self.makeSubMenu(menu)
         yield from self.subMenuEntered()
         yield from self.subMenu.enter(y, x, lines)
         yield from self.subMenu.post_update_self(False, y, x, lines)
@@ -212,6 +213,10 @@ class PttMenu(PttMenuTemplate, ABC):
         if False: yield
 
     def post_update(self, y, x, lines):
+        if not hasattr(self, "__pre_updated"):
+            self.__subMenuExited = False
+        else:
+            del self.__pre_updated
         if not self.__subMenuExited:
             if self.subMenu is None:
                 if self.clientEvent != ClientEvent.Unknown:
@@ -239,14 +244,15 @@ class HelpScreen(PttMenu):
 
     @staticmethod
     def is_entered(lines):
-        if "請按 空白鍵 繼續" not in lines[-1]:
+        if ("請按 空白鍵 繼續" not in lines[-1]) and ("請按任意鍵繼續" not in lines[-1]):
             yield ProxyEvent.as_bool(False)
             return
-        # in panel, board and thread
+        # in panel, board, thread viewing and posting
         yield ProxyEvent.as_bool( \
                   lines[0].startswith("【 看板選單輔助說明 】") or \
                   lines[0].startswith("【基本命令】") or \
-                  ("瀏覽程式使用說明" in lines[0]) )
+                  ("瀏覽程式使用說明" in lines[0]) or \
+                  ("公佈欄使用說明" in lines[0]) )
 
     class CallAngel(PttMenu):
 

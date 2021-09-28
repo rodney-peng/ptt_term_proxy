@@ -29,6 +29,7 @@ class PttFlow:
         self.msg_to_server = []
         self.server_event = asyncio.Event()
         self.server_task = asyncio.create_task(self.server_msg_sender(flow, self.server_event))
+        self.server_waiting = False
 
         self.clientToServer = True
         self.serverToClient = True
@@ -89,6 +90,8 @@ class PttFlow:
                 evctx.insertToServer += event.content
             elif event._type == ProxyEvent.SEND_TO_SERVER:
                 evctx.sendToServer += event.content
+            elif event._type == ProxyEvent.REQ_SUBMENU_CACHED:
+                lets_do_it.send(self.macro_task is None or self.macro_task.done())
             elif event._type == ProxyEvent.WARNING:
                 print("\n!!! proxy:", event, file=sys.stderr)
             else:
@@ -133,6 +136,8 @@ class PttFlow:
             print("proxy.terminal.server:", event)
 
         self.msg_to_terminal = b''
+
+        if self.server_waiting: self.server_event.set()
 
         if self.macro_task and not self.macro_task.done():
             lets_do_it = self.terminal.lets_do_notifyClient("macro running!")
@@ -195,11 +200,11 @@ class PttFlow:
                 break
             except Exception:
                 traceback.print_exc()
-
-            rcv_len = len(self.msg_to_terminal)
-            if rcv_len == 0:
+            else:
+                rcv_len = len(self.msg_to_terminal)
+                if rcv_len == 0: continue
+            finally:
                 event.clear()
-                continue
 
             while not cancelled:
                 try:
@@ -230,8 +235,6 @@ class PttFlow:
                     self.sendToClient(evctx.insertToClient + evctx.sendToClient)
                 if evctx.insertToServer or evctx.sendToServer:
                     self.sendToServer(evctx.insertToServer + evctx.sendToServer)
-            else:
-                event.clear()
 
         print("terminal_msg_timeout() finished")
 
@@ -244,7 +247,7 @@ class PttFlow:
             self.msg_to_server.extend([i.to_bytes(1, "big") for i in data])    # ProxyEvent.SEND_TO_SERVER
         else:
             self.msg_to_server.append(data)    # from macro
-        self.server_event.set()
+        if not self.server_waiting: self.server_event.set()
 
     server_msg_interval = 0.25   # seconds
 
@@ -261,18 +264,29 @@ class PttFlow:
                 break
             except Exception:
                 traceback.print_exc()
+            finally:
+                event.clear()
 
+            self.server_waiting = True
             while not cancelled and len(self.msg_to_server):
                 try:
                     await asyncio.sleep(self.server_msg_interval)
-                    ctx.master.sendToServer(flow, self.msg_to_server.pop(0))
+                    data = self.msg_to_server.pop(0)
+                    ctx.master.sendToServer(flow, data)
+                    await asyncio.wait_for(event.wait(), self.server_msg_interval + 0.5)
+                except asyncio.TimeoutError:
+                    print("server_msg_sender() timeouted, sent", data, "remaining", self.msg_to_server, file=sys.stderr)
+                    self.msg_to_server = []
+                    cancalled = True
+                    break
                 except asyncio.CancelledError:
                     cancalled = True
                     break
                 except Exception:
                     traceback.print_exc()
-
-            event.clear()
+                finally:
+                    event.clear()
+            self.server_waiting = False
 
         print("server_msg_sender() finished")
 

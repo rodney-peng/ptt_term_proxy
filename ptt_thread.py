@@ -33,6 +33,7 @@ class SearchThread(PttMenu):
         bg = yield ProxyEvent.req_cursor_background
         assert bg is not None
         yield ProxyEvent.ok
+
         yield ProxyEvent.as_bool(bg == "white" and \
                   (lines[-2].startswith("[搜尋]關鍵字:") or lines[-2].startswith("區分大小寫(Y/N/Q)?")))
 
@@ -44,6 +45,7 @@ class UnableToReply(PttMenu):
         bg = yield ProxyEvent.req_cursor_background
         assert bg is not None
         yield ProxyEvent.ok
+
         yield ProxyEvent.as_bool(bg == "white" and \
                   lines[-2].startswith("▲ 無法回應至看板。 改回應至 (M)作者信箱 (Q)取消？[Q]"))
 
@@ -67,6 +69,7 @@ class ProxyCommand(PttMenu):
 
         self.input = ""
         self.screenData = yield ProxyEvent.req_screen_data(ClientContext(self.CommandRow, 1, length=self.CommandCol))
+        assert self.screenData is not None
         yield ProxyEvent.ok
 
         yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1, self.CommandPrompt, fg="white", bg="black"))
@@ -97,6 +100,7 @@ class ProxyCommand(PttMenu):
                 # send current ground for convenience
                 if self.input.lstrip() == "ground ":
                     ground = yield ProxyEvent.get_ground
+                    assert ground is not None
                     yield ProxyEvent.ok
                     ground = str(ground)
                     if len(self.input + ground) < self.CommandMaxLen:
@@ -242,7 +246,7 @@ class PttThread(PttMenu):
 
         if isinstance(self.subMenu, ProxyCommand):
             lets_do_it = super().client_event(event)
-            lets_do_exit = self.lets_do_subMenuExited(0, 0, [])
+            lets_do_exit = self.lets_do_subMenuExited(0, 0, [' '])
             yield from self.lets_do_if_return(lets_do_it, lets_do_exit, Commands.watched(lets_do_it))
         else:
             yield from super().client_event(event)
@@ -252,7 +256,7 @@ class PttThread(PttMenu):
                 yield ProxyEvent.drop_content
             elif self.clientEvent == ClientEvent.x:
                 yield ProxyEvent.drop_content
-                yield from self.lets_do_new_subMenu(ProxyCommand, 0, 0, [])
+                yield from self.lets_do_new_subMenu(ProxyCommand, 0, 0, [' '])
 
     def pre_update_pre_submenu(self, y, x, lines):
         if self.floorInView:

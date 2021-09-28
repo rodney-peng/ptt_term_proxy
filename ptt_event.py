@@ -84,6 +84,8 @@ class ProxyEvent:
     TRUE  = 1
     OK = 2
 
+    RUN_MACRO = 0x70
+
     # data stream events
     CUT_STREAM    = 0x80     # cut stream between server and client, only feed to the virtual terminal
     RESUME_STREAM = 0x81     # resume stream
@@ -107,7 +109,6 @@ class ProxyEvent:
     SET_GROUND = 0x107
     GET_GROUND = 0x108
 
-    RUN_MACRO = 0x180
     DRAW_CLIENT = 0x181
     DRAW_CURSOR = 0x182
     RESET_RENDITION = 0x183
@@ -117,13 +118,14 @@ class ProxyEvent:
     REQ_SCREEN_COLUMN = 0x201
     REQ_CURSOR_BACKGROUND = 0x202
     REQ_SCREEN_DATA = 0x203
+    REQ_SUBMENU_CACHED = 0x204
 
     no_arguments = { "FALSE", "TRUE", "OK",
                      "RESUME_STREAM",
                      "DROP_CONTENT",
                      "GET_GROUND",
                      "DRAW_CURSOR", "RESET_RENDITION",
-                     "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND",
+                     "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND", "REQ_SUBMENU_CACHED",
                    }
 
     type2names = {}
