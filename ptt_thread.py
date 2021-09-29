@@ -14,7 +14,7 @@ class ThreadOption(PttMenu):
 
     @staticmethod
     def is_entered(lines):
-        yield ProxyEvent.as_bool("設定選項" in lines[-9] and "請調整設定" in lines[-1])
+        yield ProxyEvent.as_bool(("設定選項" in lines[-9] or "快速設定" in lines[-3]) and "請調整設定" in lines[-1])
 
 
 class JumpToPosition(PttMenu):
@@ -48,6 +48,20 @@ class UnableToReply(PttMenu):
 
         yield ProxyEvent.as_bool(bg == "white" and \
                   lines[-2].startswith("▲ 無法回應至看板。 改回應至 (M)作者信箱 (Q)取消？[Q]"))
+
+
+class Animation(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        bg = yield ProxyEvent.req_cursor_background
+        assert bg is not None
+        yield ProxyEvent.ok
+
+        yield ProxyEvent.as_bool( \
+                  (bg == "white" and lines[-1].strip() == '' and \
+                   ("直接播放請輸入速度" in lines[-2] or "要模擬 24 行嗎" in lines[-2])) or \
+                  "動畫播放中" in lines[-1] )
 
 
 class ProxyCommand(PttMenu):
@@ -146,8 +160,12 @@ class PttThread(PttMenu):
         '''
         self.groundLine = 0
 
-        self.firstViewed = self.lastViewed = 0  # Epoch time
+        self.firstVisited = self.lastVisited = 0  # Epoch time
         self.elapsedTime = 0  # in seconds
+        self.revisit = 0  # in number of revisit
+
+        # hash values of the first screen
+        self.hashs = None
 
         self.atBegin = self.atEnd = False
         self.viewedFirstLine = 0
@@ -180,7 +198,7 @@ class PttThread(PttMenu):
 
     @classmethod
     def is_entered(cls, lines):
-        yield ProxyEvent.as_bool(re.match("\s*瀏覽", lines[-1]) and re.search("\(←\)離開\s*$", lines[-1]))
+        yield ProxyEvent.as_bool(lines[-1].lstrip().startswith('瀏覽 ') and lines[-1].rstrip().endswith('(←)離開'))
 
     @classmethod
     def setEnteringTrigger(cls, event):
@@ -200,7 +218,10 @@ class PttThread(PttMenu):
             del self.switchedTime
         else:
             self.enteredTime = time.time()
-        if not self.firstViewed: self.firstViewed = self.enteredTime
+        if not self.firstVisited:
+            self.firstVisited = self.enteredTime
+        else:
+            self.revisit += 1
 
         yield from self.lets_do_enteringTrigger()
 
@@ -224,8 +245,8 @@ class PttThread(PttMenu):
 
     def exit(self):
         if not hasattr(self, "switchedTime"):
-            self.lastViewed = time.time()
-            elapsed = int(self.lastViewed - self.enteredTime)
+            self.lastVisited = time.time()
+            elapsed = int(self.lastVisited - self.enteredTime)
             if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
@@ -266,9 +287,6 @@ class PttThread(PttMenu):
         if self.floorInView:
             yield from self.lets_do_clearFloor()
 
-        # not include 't' which is determined in post_update_is_self() because
-        # 't' goes to the next page or jumps to the next article in the same series,
-        # and can only be determined in post_update_is_self().
         if self.is_switch_event(self.clientEvent):
             yield from self.exit()
 
@@ -278,17 +296,22 @@ class PttThread(PttMenu):
         return (event in [ClientEvent.Key_Up, ClientEvent.Backspace] and self.atBegin) or \
                (event in [ClientEvent.Key_Down, ClientEvent.Key_Right, ClientEvent.Enter, ClientEvent.Space] and self.atEnd)
 
-    # switch to another thread
+    # switch to another thread, not include 't' and '=' which can only be determined in post_update_is_self().
+    # 't' goes to the next page or jumps to the next article in the same series.
+    # '=' goes to the first article or goes to the beginning if it's already the first article and not at the beginning.
     def is_switch_event(self, event: ClientEvent):
-        return chr(event) in "fb[]+-=Aa"
+        return chr(event) in "fb[]+-Aa"
 
     subMenus = { ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
+                 ClientEvent.QuestionMark: HelpScreen,
                  ClientEvent.o: ThreadOption,
+                 ClientEvent.Backslash: ThreadOption,
                  ClientEvent.Q: ThreadInfo,
                  ClientEvent.Slash: SearchThread,
                  ClientEvent.r: UnableToReply,
                  ClientEvent.y: UnableToReply,
+                 ClientEvent.p: Animation,
                  ClientEvent.Key1: JumpToPosition,
                  ClientEvent.Key2: JumpToPosition,
                  ClientEvent.Key3: JumpToPosition,
@@ -327,11 +350,15 @@ class PttThread(PttMenu):
                 self.setEnteringTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
         yield from super().lets_do_subMenuExited(y, x, lines)
 
+    re_match_browse_line = (lambda line: re.match("瀏覽.+\(\s*?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", line.lstrip()))
+
     def post_update_is_self(self, y, x, lines):
-        if self.clientEvent == ClientEvent.t:
-            browse = re.match("\s*瀏覽.+\(\ *?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", lines[-1])
+        if self.clientEvent in [ClientEvent.Equal, ClientEvent.t]:
+            browse = type(self).re_match_browse_line(lines[-1])
             if browse is None or int(browse.group(2)) == 1:
-                yield from self.exit()
+                hashs = self.hashScreen(lines)
+                if self.hashs is None or hashs is None or self.hashs != hashs:
+                    yield from self.exit()
         else:
             yield from super().post_update_is_self(y, x, lines)
 
@@ -410,10 +437,30 @@ class PttThread(PttMenu):
             yield ProxyEvent.reset_rendition
             if cursor_return: yield ProxyEvent.draw_cursor
 
+    @classmethod
+    def hashScreen(cls, lines):
+        browse = cls.re_match_browse_line(lines[-1])
+        # usually line 1 is title and line 2 is time
+        if browse and lines[1].strip() and lines[2].strip():
+            first = int(browse.group(2))
+            last  = int(browse.group(3))
+            if first == 1 and last < len(lines):
+                row = last - first
+                while row > 2:
+                    line = lines[row].strip()
+                    if line:
+                        hashs = hash((lines[1].strip(), lines[2].strip(), line))
+                        return hashs
+                    row -= 1
+                if lines[0].strip():
+                    hashs = hash((lines[0].strip(), lines[1].strip(), lines[2].strip()))
+                    return hashs
+        return None
+
     LINE_HOLDER = chr(0x7f)
 
     def lets_do_view(self, lines):
-        browse = re.match("\s*瀏覽.+\(\ *?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", lines[-1])
+        browse = type(self).re_match_browse_line(lines[-1])
         if browse is None: return
         screenLines = lines
         lines = lines[0:-1]
@@ -427,6 +474,9 @@ class PttThread(PttMenu):
 
         self.atBegin = (first == 1)
         self.atEnd = (percent == 100)
+
+        if self.atBegin and self.hashs is None:
+            self.hashs = self.hashScreen(screenLines)
 
         if self.lastLine < last:
             # which is better?
@@ -619,8 +669,8 @@ class PttThread(PttMenu):
 
         url = self.scanURL()
         print("\nThread lines:", self.lastLine, "url:", url)
-        if self.firstViewed: print("firstViewed:", time.ctime(self.firstViewed))
-        if self.lastViewed:  print("lastViewed:", time.ctime(self.lastViewed))
+        if self.firstVisited: print("firstVisited:", time.ctime(self.firstVisited))
+        if self.lastVisited:  print("lastVisited:", time.ctime(self.lastVisited))
         print("Elapsed:", sec2time(self.elapsedTime))
         if url:
             board, fn = self.url2fn(url)
@@ -791,9 +841,9 @@ class PttThreadPersist(PttThread):
         self.lastLine = len(self.lines)
         self.url = thread.url
 
-        if self.firstViewed == 0:
-            self.firstViewed = thread.firstViewed
-        self.lastViewed = thread.lastViewed
+        if self.firstVisited == 0:
+            self.firstVisited = thread.firstVisited
+        self.lastVisited = thread.lastVisited
         self.elapsedTime += thread.elapsedTime
 
 
@@ -801,7 +851,7 @@ def test(thread):
     thread.url = "http://www.ptt.cc/bbs/Lifeismoney/M.1630497037.A.786.html"
     lines = [ "",
               "a" * 120,
-              "",
+              "ccccccccc",
               "b" * 240,
               ""
               "--",

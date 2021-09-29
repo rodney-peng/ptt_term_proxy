@@ -2,7 +2,7 @@ import re
 import time
 
 from ptt_event import ProxyEvent, ClientEvent
-from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry
+from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry, WhereAmI
 from ptt_thread import PttThread
 
 
@@ -70,14 +70,15 @@ class PttBoard(PttMenu):
         self.onboarding = False
         self.threads = {}
 
-        self.firstViewed = self.lastViewed = 0  # Epoch time
+        self.firstVisited = self.lastVisited = 0  # Epoch time
         self.elapsedTime = 0  # in seconds
+        self.revisit = 0  # in number of revisit
 
     @staticmethod
-    def is_entered(lines, board=None):
+    def is_entered(lines, board=None, ignoreBottom=False):
         # In '系列' only displays the first thread for a series
-        title = re.match("\s*【*(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》\s*$", lines[0])
-        if title and re.match("\s*文章選讀", lines[-1]):
+        title = re.match("【(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》$", lines[0].strip())
+        if title and (ignoreBottom or re.match("文章選讀", lines[-1].lstrip())):
             yield ProxyEvent(ProxyEvent.BOARD_NAME, title.group(3))
             yield ProxyEvent.as_bool((board == title.group(3)) if board else True)
         else:
@@ -85,7 +86,10 @@ class PttBoard(PttMenu):
 
     def enter(self, y, x, lines):
         self.enteredTime = time.time()
-        if not self.firstViewed: self.firstViewed = self.enteredTime
+        if not self.firstVisited:
+            self.firstVisited = self.enteredTime
+        else:
+            self.revisit += 1
 
         yield from super().enter(y, x, lines)
         self.cursorLine = ""
@@ -97,8 +101,8 @@ class PttBoard(PttMenu):
             print(self.prefix(), lines[y])
 
     def exit(self):
-        self.lastViewed = time.time()
-        elapsed = int(self.lastViewed - self.enteredTime)
+        self.lastVisited = time.time()
+        elapsed = int(self.lastVisited - self.enteredTime)
         if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
@@ -156,6 +160,7 @@ class PttBoard(PttMenu):
                  ClientEvent.Z: SearchBox,
                  ClientEvent.G: SearchBox,
                  ClientEvent.A: SearchBox,
+                 ClientEvent.Ctrl_W: WhereAmI,
                  ClientEvent.Ctrl_P: PostThread,
                  ClientEvent.Enter:     PttThread,
                  ClientEvent.Key_Right: PttThread,
@@ -204,13 +209,16 @@ class PttBoard(PttMenu):
             yield from super().makeSubMenu(menu)
 
     def lets_do_subMenuExited(self, y, x, lines):
+        # when returned from SearchBox searching for AIDC, the bottom line may be absent
+        self.returnedFromSearchBox = isinstance(self.subMenu, SearchBox)
+
         resume_event = self.subMenu.to_be_resumed()
         if resume_event: self.resumingSubMenu = self.subMenu
         yield from super().lets_do_subMenuExited(y, x, lines)
         if resume_event: yield resume_event
 
     def post_update_is_self(self, y, x, lines):
-        if not ProxyEvent.eval_bool(self.is_entered(lines, self.name)):
+        if not ProxyEvent.eval_bool(self.is_entered(lines, self.name, getattr(self, "returnedFromSearchBox", False))):
             if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
                 # switch to another thread
                 # cannot call makeThread() here since we don't have the title line

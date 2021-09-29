@@ -123,8 +123,14 @@ class PttFlow:
             print("proxy.client_message: drop", flow_msg.content)
             flow_msg.drop()
 
-    def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext):
+    def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext = None):
+        if len(self.msg_to_terminal) == 0:
+            raise AssertionError("Purging terminal message but there is none!!!")
         event.clear()
+
+        out_of_band = evctx is None
+        if out_of_band:
+            evctx = self.EventContext()
 
         lets_do_it = self.terminal.server_message(self.msg_to_terminal)
         for event in self.terminal_events(lets_do_it, evctx):
@@ -147,6 +153,16 @@ class PttFlow:
             self.macro_event.clear()
             self.macro_task = asyncio.create_task(self.run_macro(self.flow, self.macro, self.macro_event, self.macro_done))
             self.macro = None
+
+        if out_of_band:
+            self.terminal.showScreen()
+
+            assert not evctx.dropContent
+            assert evctx.replaceContent is None
+            if evctx.insertToClient or evctx.sendToClient:
+                self.sendToClient(evctx.insertToClient + evctx.sendToClient)
+            if evctx.insertToServer or evctx.sendToServer:
+                self.sendToServer(evctx.insertToServer + evctx.sendToServer)
 
     def server_message(self, flow_msg):
         evctx = self.EventContext()
@@ -195,11 +211,12 @@ class PttFlow:
                 break
             except Exception:
                 traceback.print_exc()
-            else:
-                rcv_len = len(self.msg_to_terminal)
-                if rcv_len == 0: continue
-            finally:
+
+            rcv_len = len(self.msg_to_terminal)
+            if rcv_len == 0:
+                print("\nTerminal event set but no pending message!!!", file=sys.stderr)
                 event.clear()
+                continue
 
             while not cancelled:
                 try:
@@ -217,19 +234,11 @@ class PttFlow:
 
             if cancelled: break
 
-            if len(self.msg_to_terminal):
-                print("Server event timeout! Pending:", len(self.msg_to_terminal))
-                evctx = self.EventContext()
-                self.purge_terminal_message(event, evctx)
-
-                self.terminal.showScreen()
-
-                assert not evctx.dropContent
-                assert evctx.replaceContent is None
-                if evctx.insertToClient or evctx.sendToClient:
-                    self.sendToClient(evctx.insertToClient + evctx.sendToClient)
-                if evctx.insertToServer or evctx.sendToServer:
-                    self.sendToServer(evctx.insertToServer + evctx.sendToServer)
+            if event.is_set():
+                print("\nTerminal message timeout! Pending:", len(self.msg_to_terminal))
+                self.purge_terminal_message(event)
+            else:
+                assert len(self.msg_to_terminal) == 0
 
         print("terminal_msg_timeout() finished")
 
@@ -301,6 +310,12 @@ class PttFlow:
     # no self-injected to-client message
     def handle_message(self, flow_msg):
         if flow_msg.from_client:
+            if self.terminal_event.is_set():
+                print("\nTerminal message pending:", len(self.msg_to_terminal), file=sys.stderr)
+                self.purge_terminal_message(self.terminal_event)
+            else:
+                assert len(self.msg_to_terminal) == 0
+
             self.client_message(flow_msg)
         else:
             self.server_message(flow_msg)

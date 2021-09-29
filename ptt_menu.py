@@ -281,9 +281,10 @@ class SearchBox(PttMenu):
     @staticmethod
     def is_entered(lines):
         yield ProxyEvent.as_bool(
-                  lines[-1].startswith("搜尋") or \
+                  lines[-1].lstrip().startswith("搜尋") or lines[-1].lstrip().startswith("◆ 反向搜尋") or \
                   lines[-2].startswith("請輸入看板中文關鍵字:") or \
-                  re.search("(不支援.*搜尋|沒有.*關鍵字)", lines[-1]) is not None )
+                 (re.search("(不支援.*搜尋|沒有.*關鍵字)", lines[-1]) is not None) or \
+                 (lines[-10].lstrip().startswith("找不到這個文章代碼") and "請按任意鍵繼續" in lines[-1]) )
 
 
 class QuickSwitch(PttMenu):
@@ -315,6 +316,14 @@ class ThreadInfo(PttMenu):
                 yield ProxyEvent.as_bool(True)
                 return
         yield ProxyEvent.as_bool(False)
+
+
+class WhereAmI(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        yield ProxyEvent.as_bool(lines[1].strip() == '我在哪?' and \
+                  lines[-3].lstrip().startswith('位置:') and '請按任意鍵繼續' in lines[-1] )
 
 
 def test(menu):

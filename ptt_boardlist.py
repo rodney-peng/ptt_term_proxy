@@ -2,7 +2,7 @@ import sys
 import os
 import re
 
-from ptt_menu import PttMenu, SearchBoard, QuickSwitch, HelpScreen, SearchBox, JumpToEntry
+from ptt_menu import PttMenu, SearchBoard, QuickSwitch, HelpScreen, SearchBox, JumpToEntry, WhereAmI
 from ptt_event import ProxyEvent, ClientEvent
 from ptt_board import PttBoard
 
@@ -53,7 +53,8 @@ class PttBoardList(PttMenu):
                  ClientEvent.Ctrl_S: SearchBoard,
                  ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
-                 ClientEvent.Slash: SearchBox,
+                 ClientEvent.Slash:  SearchBox,
+                 ClientEvent.Ctrl_W: WhereAmI,
                  ClientEvent.Enter:     PttBoard,
                  ClientEvent.Key_Right: PttBoard,
                  ClientEvent.l:         PttBoard,

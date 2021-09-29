@@ -10,10 +10,12 @@ class UserEvent:
         'Tab': '\t',
         # 32 ~ 126 is the same viewable ASCII code
         'Space': ' ',
+        'Equal': '=',
         'Colon': ':',
         'SemiColon': ';',
         'PoundSign': '#',
         'Slash': '/',
+        'Backslash': '\\',
         'QuestionMark': '?',
     }
 
