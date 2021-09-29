@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 
 '''
     A customized mitmdump that has preconfigured options and can capture signals and watch connections.
@@ -27,6 +28,7 @@ from mitmproxy.addons.script import load_script
 from mitmproxy.hooks import Hook
 from mitmproxy.proxy.layers.websocket import WebSocketMessageInjected, WebsocketLayer
 from mitmproxy.proxy import events, layer
+from wsproto.frame_protocol import Opcode
 
 import ptt_proxy
 
@@ -97,36 +99,21 @@ class myDumpMaster(DumpMaster):
         print("master got SIGUSR2", self._watchdog_time)
 
     from mitmproxy.flow import Flow
-    # TODO: figure a better way to distinguish a self-injected message
-    injected_mark = b'self-injected:'
 
     #@command.command("self-inject.websocket")  # for addon only
     def inject_websocket(self, flow: Flow, to_client: bool, message: bytes, is_text: bool = True):
         from mitmproxy import http, websocket
-        from wsproto.frame_protocol import Opcode
-
-        class webSocketMessage(websocket.WebSocketMessage):
-
-            @classmethod
-            def from_state(cls, state: websocket.WebSocketMessageState):
-                print("from_state:", state)
-                return super().from_state(state)
-
-            def set_state(self, state: websocket.WebSocketMessageState) -> None:
-                print("set_state:", state)
-                super().set_state(state)
-
 
         if not isinstance(flow, http.HTTPFlow) or not flow.websocket:
             self.log.warn("Cannot inject WebSocket messages into non-WebSocket flows.")
 
 #        print("self-injected, to_client:", to_client, len(message))
-        msg = webSocketMessage(
+        msg = websocket.WebSocketMessage(
             Opcode.TEXT if is_text else Opcode.BINARY,
             not to_client,
-            self.injected_mark + message,
-            123      # mark a self-injected message, but not sustained to websocket_message()
+            message
         )
+        msg._self_injected = True   # mark a self-injected message
         event = WebSocketMessageInjected(flow, msg)
         try:
             self.proxyserver.inject_event(event)
@@ -135,7 +122,6 @@ class myDumpMaster(DumpMaster):
 
     def sendToServer(self, flow, data):
         assert isinstance(data, bytes)
-        print("main.sendToServer:", data)
         to_client = False
         is_text = False
         self.inject_websocket(flow, to_client, data, is_text)
@@ -144,7 +130,6 @@ class myDumpMaster(DumpMaster):
 
     def sendToClient(self, flow, data):
         assert isinstance(data, bytes)
-        print("main.sendToClient:", len(data))
         to_client = True
         is_text = False
         self.inject_websocket(flow, to_client, data, is_text)
@@ -152,16 +137,7 @@ class myDumpMaster(DumpMaster):
 
     @classmethod
     def is_self_injected(cls, flow_msg):
-        marklen = len(cls.injected_mark)
-        return len(flow_msg.content) > marklen and flow_msg.content[:marklen] == cls.injected_mark
-
-    @classmethod
-    def self_injected_content(cls, flow_msg):
-        return flow_msg.content[len(cls.injected_mark):]
-
-    @classmethod
-    def strip_self_injected(cls, flow_msg):
-        flow_msg.content = flow_msg.content[len(cls.injected_mark):]
+        return getattr(flow_msg, "_self_injected", False)
 
     # only applies to a WebsocketLayer in start state
     def websocketLayerStarted(self, wslayer: WebsocketLayer):
@@ -179,9 +155,9 @@ class myDumpMaster(DumpMaster):
         if isinstance(wslayer, WebsocketLayer) and wslayer is not getattr(self, "wslayer", None):
             print(wslayer._handle_event)
             if wslayer._handle_event in [wslayer.__class__.start, wslayer.start]:
+                self.wslayer = wslayer
                 self.wsl_relay_messages = wslayer.relay_messages
                 wslayer.relay_messages = self.relay_websocket_messages
-                self.wslayer = wslayer
                 print("hijacked!", self.wslayer)
                 return True
         return False
@@ -193,8 +169,30 @@ class myDumpMaster(DumpMaster):
 
     @expect(events.DataReceived, events.ConnectionClosed, WebSocketMessageInjected)
     def relay_websocket_messages(self, event: events.Event) -> layer.CommandGenerator[None]:
-        '''
+        from mitmproxy.proxy.layers.websocket import WebsocketMessageHook, Fragmentizer
+
         try:
+            if isinstance(event, WebSocketMessageInjected) and self.is_self_injected(event.message):
+                message = event.message
+
+                self.wslayer.flow.websocket.messages.append(message)
+                yield WebsocketMessageHook(self.wslayer.flow)
+
+                if message.dropped:
+                    target = "server" if message.from_client else "client"
+                    print("\nself-injected dropped: to", target, message)
+                    return
+
+                if message.from_client:
+                    dst_ws = self.wslayer.server_ws
+                else:
+                    dst_ws = self.wslayer.client_ws
+
+                fragmentizer = Fragmentizer([], message.type == Opcode.TEXT)
+                for msg in fragmentizer(message.content):
+                    yield dst_ws.send2(msg)
+                return
+            '''
             if isinstance(event, events.DataReceived):
                 target = type(event.connection).__name__.lower()
                 print(f"\nws data from {target}:", len(event.data))
@@ -203,9 +201,10 @@ class myDumpMaster(DumpMaster):
                 print(f"\nws data to {target}:", len(event.message.content))
             else:
                 print("\nws event:", event)
+            '''
         except Exception:
             traceback.print_exc()
-        '''
+            return
 
         yield from self.wsl_relay_messages(event)
 

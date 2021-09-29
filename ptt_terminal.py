@@ -392,7 +392,7 @@ class PttTerminal:
             yield from self.lets_do_terminal_event(lets_do_it2, event)
 
     def server_message(self, content):
-        print("terminal.server_message: (%d)" % len(content))
+        print("\nterminal.server_message: (%d)" % len(content))
         self.feed(content)
         yield from self.post_server_message()
 

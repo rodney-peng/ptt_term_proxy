@@ -99,14 +99,10 @@ class PttFlow:
 
     def client_message(self, flow_msg):
         print('\n')
-        if ctx.master.is_self_injected(flow_msg):
-            ctx.master.strip_self_injected(flow_msg)
-            client_msg = flow_msg.content
-        else:
-            client_msg = flow_msg.content
-            if not self.clientToServer:
-#                print("proxy.client_message: cut", flow_msg.content)
-                flow_msg.content = b''
+        client_msg = flow_msg.content
+        if not ctx.master.is_self_injected(flow_msg) and not self.clientToServer:
+#            print("proxy.client_message: cut", flow_msg.content)
+            flow_msg.content = b''
 
         lets_do_it = self.terminal.client_message(client_msg)
         evctx = self.EventContext()
@@ -128,7 +124,6 @@ class PttFlow:
             flow_msg.drop()
 
     def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext):
-        print('\n')
         event.clear()
 
         lets_do_it = self.terminal.server_message(self.msg_to_terminal)
@@ -290,13 +285,12 @@ class PttFlow:
 
         print("server_msg_sender() finished")
 
-    # all messages, self-injected message still has mark
     def preview_message(self, flow_msg):
-        if (not flow_msg.from_client):
+        if not flow_msg.from_client:
             if ctx.master.is_self_injected(flow_msg):
-                print("wsmsg to client:", ctx.master.self_injected_content(flow_msg))
-            else:
-                print("wsmsg to client: (%d)" % len(flow_msg.content))
+                print("\ninject to client: (%d)" % len(flow_msg.content), flow_msg.content)
+            #else:
+            #    print("server to client: (%d)" % len(flow_msg.content))
 
         if 0 < self.stream_resume_time < time.time():
             print("Maximum cut time exceeded, resume stream!!!", file=sys.stderr)
@@ -474,7 +468,6 @@ class PttProxy:
 
         # we are not interested in injected-to-client message, e.g. floor numbers.
         if (not flow_msg.from_client) and ctx.master.is_self_injected(flow_msg):
-            ctx.master.strip_self_injected(flow_msg)
             return
 
         self.pttFlows[flow].handle_message(flow_msg)
