@@ -164,8 +164,8 @@ class PttThread(PttMenu):
         self.elapsedTime = 0  # in seconds
         self.revisit = 0  # in number of revisit
 
-        # hash values of the first screen
-        self.hashs = None
+        # hash value of the first screen (starts with line 1)
+        self.hash_value = None
 
         self.atBegin = self.atEnd = False
         self.viewedFirstLine = 0
@@ -296,11 +296,15 @@ class PttThread(PttMenu):
         return (event in [ClientEvent.Key_Up, ClientEvent.Backspace] and self.atBegin) or \
                (event in [ClientEvent.Key_Down, ClientEvent.Key_Right, ClientEvent.Enter, ClientEvent.Space] and self.atEnd)
 
-    # switch to another thread, not include 't' and '=' which can only be determined in post_update_is_self().
-    # 't' goes to the next page or jumps to the next article in the same series.
-    # '=' goes to the first article or goes to the beginning if it's already the first article and not at the beginning.
-    def is_switch_event(self, event: ClientEvent):
-        return chr(event) in "fb[]+-Aa"
+    # switch to another thread
+    @staticmethod
+    def is_switch_event(event: ClientEvent):
+        return chr(event) in "fb]+Aa"
+
+    # move in the same thread or switch to another, status can only be determined in post_update_is_self()
+    @staticmethod
+    def may_be_switch_event(event: ClientEvent):
+        return chr(event) in "[-=t"
 
     subMenus = { ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
@@ -353,11 +357,11 @@ class PttThread(PttMenu):
     re_match_browse_line = (lambda line: re.match("瀏覽.+\(\s*?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", line.lstrip()))
 
     def post_update_is_self(self, y, x, lines):
-        if self.clientEvent in [ClientEvent.Equal, ClientEvent.t]:
+        if self.may_be_switch_event(self.clientEvent):
             browse = type(self).re_match_browse_line(lines[-1])
             if browse is None or int(browse.group(2)) == 1:
-                hashs = self.hashScreen(lines)
-                if self.hashs is None or hashs is None or self.hashs != hashs:
+                hash_value = self.hash_screen(lines)
+                if self.hash_value is None or hash_value is None or self.hash_value != hash_value:
                     yield from self.exit()
         else:
             yield from super().post_update_is_self(y, x, lines)
@@ -438,7 +442,7 @@ class PttThread(PttMenu):
             if cursor_return: yield ProxyEvent.draw_cursor
 
     @classmethod
-    def hashScreen(cls, lines):
+    def hash_screen(cls, lines):
         non_empty = []
         row = 0
         stop_row = len(lines) - 1
@@ -452,9 +456,9 @@ class PttThread(PttMenu):
             if lines[row].strip(): non_empty.append(str(row+1) + lines[row].strip())
             row -= 1
         if len(non_empty) == 4:
-            hashs = hash(tuple(non_empty))
-            print(hashs, tuple(non_empty))
-            return hashs
+            hash_value = hash(tuple(non_empty))
+#            print(hash_value, tuple(non_empty))
+            return hash_value
         return None
 
     LINE_HOLDER = chr(0x7f)
@@ -475,8 +479,8 @@ class PttThread(PttMenu):
         self.atBegin = (first == 1)
         self.atEnd = (percent == 100)
 
-        if self.atBegin and self.hashs is None:
-            self.hashs = self.hashScreen(screenLines)
+        if self.atBegin and self.hash_value is None:
+            self.hash_value = self.hash_screen(screenLines)
 
         if self.lastLine < last:
             # which is better?
