@@ -34,6 +34,8 @@ class PttFlow:
         self.clientToServer = True
         self.serverToClient = True
         self.stream_resume_time = 0
+        self.client_cut = 0
+        self.server_cut = 0
 
         self.macro = None
         self.macro_event = asyncio.Event()
@@ -102,6 +104,7 @@ class PttFlow:
         client_msg = flow_msg.content
         if not ctx.master.is_self_injected(flow_msg) and not self.clientToServer:
 #            print("proxy.client_message: cut", flow_msg.content)
+            self.client_cut += len(flow_msg.content)
             flow_msg.content = b''
 
         lets_do_it = self.terminal.client_message(client_msg)
@@ -170,9 +173,11 @@ class PttFlow:
         firstSegment = not self.msg_to_terminal
         lastSegment  = len(flow_msg.content) < 1021
 
+        '''
         if not lastSegment and flow_msg.content[-16:].decode("utf-8", "ignore").endswith("\x1b[%d;%dH" % self.terminal.size()):
             print("proxy.server_message: force purging", len(flow_msg.content))
             lastSegment = True
+        '''
 
         if firstSegment:
             lets_do_it = self.terminal.pre_server_message()
@@ -183,6 +188,7 @@ class PttFlow:
 
         if not self.serverToClient:
 #            print("proxy.server_message: cut", len(flow_msg.content))
+            self.server_cut += len(flow_msg.content)
             flow_msg.content = b''
 
         if lastSegment:
@@ -212,8 +218,8 @@ class PttFlow:
             except Exception:
                 traceback.print_exc()
 
-            rcv_len = len(self.msg_to_terminal)
-            if rcv_len == 0:
+            msg_len = len(self.msg_to_terminal)
+            if msg_len == 0:
                 print("\nTerminal event set but no pending message!!!", file=sys.stderr)
                 event.clear()
                 continue
@@ -228,9 +234,10 @@ class PttFlow:
                 except Exception:
                     traceback.print_exc()
 
-                # no more coming data
-                if len(self.msg_to_terminal) <= rcv_len:
-                    break
+                rcv_len = len(self.msg_to_terminal)
+                # no more coming data?
+                if rcv_len <= msg_len: break
+                msg_len = rcv_len
 
             if cancelled: break
 
