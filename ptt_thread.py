@@ -439,22 +439,22 @@ class PttThread(PttMenu):
 
     @classmethod
     def hashScreen(cls, lines):
-        browse = cls.re_match_browse_line(lines[-1])
-        # usually line 1 is title and line 2 is time
-        if browse and lines[1].strip() and lines[2].strip():
-            first = int(browse.group(2))
-            last  = int(browse.group(3))
-            if first == 1 and last < len(lines):
-                row = last - first
-                while row > 2:
-                    line = lines[row].strip()
-                    if line:
-                        hashs = hash((lines[1].strip(), lines[2].strip(), line))
-                        return hashs
-                    row -= 1
-                if lines[0].strip():
-                    hashs = hash((lines[0].strip(), lines[1].strip(), lines[2].strip()))
-                    return hashs
+        non_empty = []
+        row = 0
+        stop_row = len(lines) - 1
+        # usually the first thress lines are author, title and time
+        while row < stop_row and len(non_empty) < 3:
+            if lines[row].strip(): non_empty.append(str(row+1) + lines[row].strip())
+            row += 1
+        # add the last non-empty row
+        stop_row, row = row-1, stop_row-1
+        while stop_row < row and len(non_empty) < 4:
+            if lines[row].strip(): non_empty.append(str(row+1) + lines[row].strip())
+            row -= 1
+        if len(non_empty) == 4:
+            hashs = hash(tuple(non_empty))
+            print(hashs, tuple(non_empty))
+            return hashs
         return None
 
     LINE_HOLDER = chr(0x7f)
