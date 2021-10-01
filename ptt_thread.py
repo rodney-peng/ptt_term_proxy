@@ -147,9 +147,6 @@ class PttThread(PttMenu):
 
         self.lines = []
         self.lastLine = 0
-        self.floors = []
-        self.lastFloorLine = 0
-        self.bannedFloors = {}
 
         self.url = None
         '''
@@ -159,6 +156,8 @@ class PttThread(PttMenu):
             In case of no URL, command "ground <line>" can set the ground line explicitly.
         '''
         self.groundLine = 0
+        self.floors = []
+        self.bannedFloors = {}
 
         # TODO: use datetime.timedelta
         self.firstVisited = self.lastVisited = 0  # Epoch time
@@ -172,7 +171,7 @@ class PttThread(PttMenu):
         self.viewedFirstLine = 0
         self.viewedLastLine = 0
         self.viewedLastRow = 0
-        self.floorInView = False
+        self.floorInView = 0
 
     @staticmethod
     def keyToPrefix(board, key):
@@ -189,13 +188,12 @@ class PttThread(PttMenu):
         if url == self.url: return
         self.url = url
         self.groundLine = 0
-        self.lastFloorLine = 0
-        self.floors = [0] * self.lastLine
+        self.floors = []
         self.bannedFloors = {}
         if self.lastLine:
             self.scanURL()
             if self.groundLine:
-                self.scanFloor(self.groundLine + 1, self.lastLine)
+                self.scanFloor()
 
     @classmethod
     def is_entered(cls, lines):
@@ -373,8 +371,8 @@ class PttThread(PttMenu):
     re_push_msg = "(推|噓|→) [0-9A-Za-z]+\s*:"
 
     def ban_floor(self, lets_do_it, floor: int):
-        if floor > 0 and floor in self.floors and floor not in self.bannedFloors:
-            line = self.floors.index(floor) + 1
+        if 0 < floor <= len(self.floors) and floor not in self.bannedFloors:
+            line = self.floors[floor-1]
             lets_do_it = self.ban_line(line, True)  # no need to return the cursor as ProxyCommand.exit() will do
             def add_banned_floor(event):
                 self.bannedFloors[floor] = event.content
@@ -387,7 +385,7 @@ class PttThread(PttMenu):
 
         if floor <= 0 or floor not in self.bannedFloors: return
 #        print(self.prefix(), "unbanned %d: '%s'" % (floor, self.bannedFloors[floor]))
-        line = self.floors.index(floor) + 1
+        line = self.floors[floor-1]
         if self.viewedFirstLine <= line <= self.viewedLastLine:
             prefix = re.match(self.re_push_msg + "\s", self.lines[line-1])
             row = self.viewedLastRow - (self.viewedLastLine - line)
@@ -399,24 +397,17 @@ class PttThread(PttMenu):
 
     def set_ground(self, lets_do_it, line: int):
         if self.groundLine == line or line < 0 or line > self.lastLine: return
-        print(self.prefix(), "set_ground", line)
         for floor in self.bannedFloors:
             yield from self.unban_floor(lets_do_it, floor, False)
         self.bannedFloors = {}
 
         if self.floorInView:
             yield from self.lets_do_clearFloor()
-        self.lastFloorLine = 0
 
-        self.floors = [0] * self.lastLine
+        # TODO: can the ground line below the URL even the floors are correct in both cases?
         self.groundLine = line
-        if line == 0:
-            self.scanURL()
-        else:
-            self.floors[:line] = [None] * line
-        if self.groundLine: self.scanFloor(self.groundLine + 1, self.lastLine)
-        if self.lastFloorLine and self.viewedLastRow:
-            yield from self.lets_do_showFloor(self.viewedFirstLine, self.viewedLastLine, self.viewedLastRow)
+        self.floors = []
+        yield from self.lets_do_update()
 
     def get_ground(self, lets_do_it, none = None):
         lets_do_it.send(self.groundLine if self.groundLine else self.viewedFirstLine)
@@ -425,7 +416,8 @@ class PttThread(PttMenu):
         def line_width(text):
             return sum([(2 if ord(c) > 0xff else 1) for c in text])
 
-        if self.lines[line-1] == self.LINE_HOLDER or not self.floors[line-1]: return
+        if line < 0 or line > self.lastLine or self.lines[line-1] == self.LINE_HOLDER or \
+           line not in self.floors: return
 
         prefix = re.match(self.re_push_msg + "\s", self.lines[line-1])
 #            print(self.prefix(), "ban_line: prefix: '%s'" % prefix.group(0))
@@ -488,7 +480,6 @@ class PttThread(PttMenu):
             #   [self.LINE_HOLDER for _ in range(last - self.lastLine)]
             #   self.LINE_HOLDER * (last - self.lastLine)
             self.lines.extend(self.LINE_HOLDER * (last - self.lastLine))
-            self.floors.extend([0] * (last - self.lastLine))
             self.lastLine = last
 
 #        print("View lines:", first, last, "curr:", len(self.lines), self.lastLine)
@@ -520,30 +511,43 @@ class PttThread(PttMenu):
         self.viewedLastLine = last
         self.viewedLastRow = i
 
+        yield from self.lets_do_update()
+
+    def lets_do_update(self):
         if not self.groundLine: self.scanURL()
-        if self.groundLine:
-            self.scanFloor(first, last)
-            yield from self.lets_do_showFloor(first, last, i)
-            if self.floorInView:
-                yield from self.lets_do_banFloor(first, last)
+
+        if not self.groundLine: return
+        self.scanFloor()
+
+        if not self.floors: return
+        yield from self.lets_do_showFloor(self.viewedFirstLine, self.viewedLastLine, self.viewedLastRow)
+
+        if not self.floorInView: return
+        yield from self.lets_do_banFloor(self.viewedFirstLine, self.viewedLastLine)
 
     def lets_do_banFloor(self, firstLine, lastLine):
-        if self.groundLine == 0 or self.viewedLastRow == 0: return
+        if not self.floorInView: return
         banned = False
         firstLine = max(firstLine, self.groundLine+1)
         for floor in self.bannedFloors:
-            line = self.floors.index(floor) + 1
+            line = self.floors[floor-1]
             if firstLine <= line <= lastLine:
                 banned = True
                 yield from self.ban_line(line)
         if banned:
             yield ProxyEvent.draw_cursor
 
+    def firstFloorInView(self, firstLine, lastLine):
+        if not self.floors or self.floors[-1] < firstLine: return 0
+        floor = 1
+        while self.floors[floor-1] < firstLine: floor += 1
+        return floor if self.floors[floor-1] <= lastLine else 0
+
     minColumns = 86
     maxWidth = 5
 
     def lets_do_showFloor(self, firstLine, lastLine, lastRow):
-        self.floorInView = False
+        self.floorInView = 0
         if not self.groundLine: return
 
         columns = yield ProxyEvent.req_screen_column
@@ -551,62 +555,43 @@ class PttThread(PttMenu):
         yield ProxyEvent.ok
         if columns < self.minColumns: return
 
-        def floorStr(floor):
-            if floor:
-                return "{:^{width}}".format(floor, width = self.maxWidth)
-            else:
-                return ' ' * self.maxWidth
+        floor = self.firstFloorInView(firstLine, lastLine)
+#        print(self.prefix(), "firstFloorInView(%d, %d) = %d" % (firstLine, lastLine, floor))
+        if not floor: return
 
-        inView = False
-        firstLine = max(firstLine-1, self.groundLine)
-        for i in range(lastLine, firstLine, -1):
-            if not self.floors[i-1]: continue
-            inView = True
-            row = lastRow - (lastLine - i)
+        self.floorInView = floor
+        floors = len(self.floors)
+        while floor <= floors and self.floors[floor-1] <= lastLine:
+            row = lastRow - (lastLine - self.floors[floor-1])
             col = self.minColumns + 1 - self.maxWidth
-            floor = floorStr(self.floors[i-1])
-#            print(self.prefix(), f"floor [{row:2}, {col:2}] = '{floor}'")
-            yield ProxyEvent.draw_client(ClientContext(row, col, floor))
-        if inView:
-            yield ProxyEvent.draw_cursor
-            self.floorInView = True
+            content = "{:^{width}}".format(floor, width = self.maxWidth)
+            yield ProxyEvent.draw_client(ClientContext(row, col, content))
+            floor += 1
+        yield ProxyEvent.draw_cursor
 
     def lets_do_clearFloor(self):
-        if not self.groundLine or not self.floorInView: return
-        firstLine = max(self.viewedFirstLine-1, self.groundLine)
+        if not self.floorInView: return
         lastLine = self.viewedLastLine
-        for i in range(lastLine, firstLine, -1):
-            if not self.floors[i-1]: continue
-            row = self.viewedLastRow - (lastLine - i)
+        lastRow = self.viewedLastRow
+        floor = self.floorInView
+        floors = len(self.floors)
+        while floor <= floors and self.floors[floor-1] <= lastLine:
+            row = lastRow - (lastLine - self.floors[floor-1])
             col = self.minColumns + 1 - self.maxWidth
-            floor = ' ' * self.maxWidth
-#            print(self.prefix(), f"clear floor [{row:2}, {col:2}] = '{floor}'")
-            yield ProxyEvent.draw_client(ClientContext(row, col, floor))
-        self.floorInView = False
+            content = ' ' * self.maxWidth
+#            print(self.prefix(), f"clear floor [{row:2}, {col:2}] = '{content}'")
+            yield ProxyEvent.draw_client(ClientContext(row, col, content))
+            floor += 1
+        self.floorInView = 0
 
-    def scanFloor(self, first: int, last: int):
+    def scanFloor(self):
         if not self.groundLine: return
-        if self.lastFloorLine:
-            floor = self.floors[self.lastFloorLine - 1]
-            line = self.lastFloorLine
-        else:
-            floor = 0
-            line = self.groundLine
-        while line < first-1:
-            if self.lines[line] == self.LINE_HOLDER: return False
+        line = self.floors[-1] if self.floors else self.groundLine
+        while line < self.lastLine:
+            if self.lines[line] == self.LINE_HOLDER: return
             if re.match(self.re_push_msg, self.lines[line]):
-                floor += 1
-                self.floors[line] = floor
-                self.lastFloorLine = line + 1
-#                print("line:", line+1, "floor:", floor)
-            line += 1
-        while line <= last-1:
-            if self.lines[line] == self.LINE_HOLDER: return False
-            if re.match(self.re_push_msg, self.lines[line]):
-                floor += 1
-                self.floors[line] = floor
-                self.lastFloorLine = line + 1
-#                print("(line):", line+1, "(floor):", floor)
+                self.floors.append(line+1)
+#                print("line:", line+1, "floor:", len(self.floors))
             line += 1
 
     def scanURL(self):
@@ -623,8 +608,6 @@ class PttThread(PttMenu):
                    self.lines[i+1].startswith("※ 文章網址:") and \
                   (self.lines[i+1])[7:].strip() == self.url:
                     self.groundLine = (i+1)+1
-                    # article lines has no floor
-                    self.floors[:self.groundLine] = [None] * self.groundLine
                     print("scanURL top-down:", self.url, "at", self.groundLine)
                     return self.url
                 i += 1
@@ -638,8 +621,6 @@ class PttThread(PttMenu):
                    self.lines[i+2].startswith("※ 文章網址:"):
                     self.url = (self.lines[i+2])[7:].strip()
                     self.groundLine = (i+2)+1
-                    # article lines has no floor
-                    self.floors[:self.groundLine] = [None] * self.groundLine
                     print("scanURL bottom-up:", self.url, "at", self.groundLine)
                     return self.url
                 i -= 1
@@ -757,7 +738,6 @@ class PttThread(PttMenu):
         self.lines = []
         self.floors = []
         if not hasattr(self, "groundLine"): self.groundLine = 0
-        if not hasattr(self, "lastFloorLine"): self.lastFloorLine = 0
 
     def loadContent(self, filename):
         try:
@@ -893,8 +873,7 @@ def test(thread):
 
     thread.elapsedTime = 51452.3456
     thread.show()
-    print("lastLine", thread.lastLine, "lastFloor", thread.lastFloorLine)
-    print(thread.floors)
+    print("floors:", thread.floors)
 
     # test thread switch
     for event in thread.client_event(ClientEvent.Key_Up):
