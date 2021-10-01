@@ -160,6 +160,7 @@ class PttThread(PttMenu):
         '''
         self.groundLine = 0
 
+        # TODO: use datetime.timedelta
         self.firstVisited = self.lastVisited = 0  # Epoch time
         self.elapsedTime = 0  # in seconds
         self.revisit = 0  # in number of revisit
@@ -246,7 +247,7 @@ class PttThread(PttMenu):
     def exit(self):
         if not hasattr(self, "switchedTime"):
             self.lastVisited = time.time()
-            elapsed = int(self.lastVisited - self.enteredTime)
+            elapsed = self.lastVisited - self.enteredTime
             if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
@@ -658,24 +659,21 @@ class PttThread(PttMenu):
         return text
 
     def show(self, complete=True):
+        # TODO: use datetime.timedelta
         def sec2time(seconds):
+            add_time = (lambda _str, _time: (_str + ' ').lstrip() + _time)
             time_str = ""
-            if seconds // 3600:
-                time_str += "%d hr" % (seconds // 3600)
-                seconds %= 3600
-            if seconds // 60:
-                if time_str: time_str += " "
-                time_str += "%d min" % (seconds // 60)
-                seconds %= 60
-            if time_str: time_str += " "
-            time_str += "%d sec" % seconds
-            return time_str
+            hours, seconds = divmod(seconds, 3600)
+            if hours: time_str = add_time(time_str, "%d hr" % hours)
+            minutes, seconds = divmod(seconds, 60)
+            if minutes: time_str = add_time(time_str, "%d min" % minutes)
+            return add_time(time_str , "%d sec" % seconds)
 
         url = self.scanURL()
         print("\nThread lines:", self.lastLine, "url:", url)
         if self.firstVisited: print("firstVisited:", time.ctime(self.firstVisited))
         if self.lastVisited:  print("lastVisited:", time.ctime(self.lastVisited))
-        print("Elapsed:", sec2time(self.elapsedTime))
+        print("Elapsed:", sec2time(round(self.elapsedTime)))
         if url:
             board, fn = self.url2fn(url)
             aidc = self.fn2aidc(fn)
@@ -855,7 +853,7 @@ def test(thread):
     thread.url = "http://www.ptt.cc/bbs/Lifeismoney/M.1630497037.A.786.html"
     lines = [ "",
               "a" * 120,
-              "ccccccccc",
+              "",
               "b" * 240,
               ""
               "--",
@@ -893,6 +891,7 @@ def test(thread):
         if event._type == ProxyEvent.REQ_SCREEN_COLUMN:
             lets_do_it.send(129)
 
+    thread.elapsedTime = 51452.3456
     thread.show()
     print("lastLine", thread.lastLine, "lastFloor", thread.lastFloorLine)
     print(thread.floors)

@@ -104,4 +104,17 @@ class PttBoardList(PttMenu):
             print(self.prefix(), "post_update_self", lines[y])
         if False: yield
 
+    def statistics(self):
+        from datetime import timedelta
+
+        boards  = len(self.boards)
+        threads = sum([len(board.threads) for board in self.boards.values()])
+        elapsed = sum([board.elapsedTime for board in self.boards.values()])
+
+        delta = timedelta(seconds=round(elapsed))
+        return f'{boards} boards, {threads} threads, elapsed {str(delta)}'
+
+
+if __name__ == "__main__":
+    print(PttBoardList().statistics())
 

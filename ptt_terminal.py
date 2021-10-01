@@ -466,6 +466,9 @@ class PttTerminal:
         data += self.cursor_position()  # restore cursor position
         yield ProxyEvent.send_to_client(data)
 
+    def statistics(self):
+        return self.boardlist.statistics()
+
 
 if __name__ == "__main__":
     PttTerminal(128, 32)

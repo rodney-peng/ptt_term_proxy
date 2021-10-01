@@ -22,6 +22,10 @@ class PttFlow:
         self.flow = flow
         self.terminal = PttTerminal(128, 32)
 
+        self.started = time.time()
+        self.ended = 0
+
+        self.terminal_pending = 0   # count of pending purge
         self.msg_to_terminal = b''
         self.terminal_event = asyncio.Event()
         self.terminal_task = asyncio.create_task(self.terminal_msg_timeout(flow, self.terminal_event))
@@ -34,8 +38,8 @@ class PttFlow:
         self.clientToServer = True
         self.serverToClient = True
         self.stream_resume_time = 0
-        self.client_cut = 0
-        self.server_cut = 0
+        self.client_cut = 0   # cut bytes of client-to-server
+        self.server_cut = 0   # cut bytes of server-to-client
 
         self.macro = None
         self.macro_event = asyncio.Event()
@@ -53,6 +57,15 @@ class PttFlow:
         self.macro_event.clear()
         if self.macro_task and not self.macro_task.done():
             self.macro_task.cancel()
+
+        print(self.terminal.statistics())
+
+        from datetime import timedelta
+        self.ended = time.time()
+        print("flow started:", time.ctime(self.started))
+        print("flow ended  :", time.ctime(self.ended))
+        print("flow elapsed:", str(timedelta(seconds=round(self.ended - self.started))))
+        print("terminal pending:", self.terminal_pending)
 
     @dataclass
     class EventContext:
@@ -133,6 +146,7 @@ class PttFlow:
 
         out_of_band = evctx is None
         if out_of_band:
+            self.terminal_pending += 1
             evctx = self.EventContext()
 
         lets_do_it = self.terminal.server_message(self.msg_to_terminal)

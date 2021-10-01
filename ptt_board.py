@@ -70,6 +70,7 @@ class PttBoard(PttMenu):
         self.onboarding = False
         self.threads = {}
 
+        # TODO: use datetime.timedelta
         self.firstVisited = self.lastVisited = 0  # Epoch time
         self.elapsedTime = 0  # in seconds
         self.revisit = 0  # in number of revisit
@@ -102,7 +103,7 @@ class PttBoard(PttMenu):
 
     def exit(self):
         self.lastVisited = time.time()
-        elapsed = int(self.lastVisited - self.enteredTime)
+        elapsed = self.lastVisited - self.enteredTime
         if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
