@@ -199,28 +199,33 @@ class PttThread(PttMenu):
     def is_entered(cls, lines):
         yield ProxyEvent.as_bool(lines[-1].lstrip().startswith('瀏覽 ') and lines[-1].rstrip().endswith('(←)離開'))
 
+    enteringTriggers = []
+
     @classmethod
-    def setEnteringTrigger(cls, event):
-        cls.enteringTrigger = event
+    def addEnteringTrigger(cls, event):
+        cls.enteringTriggers.append(event)
 
     @classmethod
     def lets_do_enteringTrigger(cls):
-        event = getattr(cls, "enteringTrigger", None)
-        if event:
+        for event in cls.enteringTriggers:
             print("PttThread.enteringTrigger", event)
             yield event
-            del cls.enteringTrigger
+        cls.enteringTriggers = []
 
     def enter(self, y, x, lines):
+        returned = getattr(self, "returned", False)
         if hasattr(self, "switchedTime"):
             self.enteredTime = self.switchedTime
             del self.switchedTime
-        else:
+        elif not returned:
             self.enteredTime = time.time()
         if not self.firstVisited:
             self.firstVisited = self.enteredTime
-        else:
+        elif not returned:
             self.revisit += 1
+        if returned:
+            print(self.prefix(), "returned")
+            del self.returned
 
         yield from self.lets_do_enteringTrigger()
 
@@ -237,10 +242,13 @@ class PttThread(PttMenu):
         # to re-enter the thread once it exited
         # don't yield directly as 'q' and 'r' almost arriving at the same time may confuse the server
         self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
-        self.setEnteringTrigger(ProxyEvent.resume_stream)
+        self.addEnteringTrigger(ProxyEvent.resume_stream)
 
     def transfer(self, from_thread):
-        self.switchedTime = from_thread.switchedTime
+        if self is from_thread:
+            self.returned = True
+        elif hasattr(from_thread, "switchedTime"):
+            self.switchedTime = from_thread.switchedTime
 
     def exit(self):
         if not hasattr(self, "switchedTime"):
@@ -345,12 +353,16 @@ class PttThread(PttMenu):
             yield from super().isSubMenuEntered(menu, lines)
 
     def lets_do_subMenuExited(self, y, x, lines):
-        if isinstance(self.subMenu, ThreadInfo):
-            yield ProxyEvent.send_to_server(b'\r')   # back to the thread
+        if isinstance(self.subMenu, ThreadInfo) or \
+           (isinstance(self.subMenu, SearchBoard) and self.board.is_entered_self(lines)):
+#            yield ProxyEvent.cut_stream(3)     # cut too late
+            # back to the thread
+            self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
             if self.viewedFirstLine > 1:
                 # back to the position
-                #yield ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine)
-                self.setEnteringTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
+                self.addEnteringTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
+#            self.addEnteringTrigger(ProxyEvent.resume_stream)      # resume too soon
+
         yield from super().lets_do_subMenuExited(y, x, lines)
 
     re_match_browse_line = (lambda line: re.match("瀏覽.+\(\s*?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", line.lstrip()))

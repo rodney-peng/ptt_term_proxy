@@ -85,6 +85,9 @@ class PttBoard(PttMenu):
         else:
             yield ProxyEvent.as_bool(False)
 
+    def is_entered_self(self, lines, ignoreBottom=False):
+        return ProxyEvent.eval_bool(self.is_entered(lines, self.name, ignoreBottom))
+
     def enter(self, y, x, lines):
         self.enteredTime = time.time()
         if not self.firstVisited:
@@ -219,7 +222,7 @@ class PttBoard(PttMenu):
         if resume_event: yield resume_event
 
     def post_update_is_self(self, y, x, lines):
-        if not ProxyEvent.eval_bool(self.is_entered(lines, self.name, getattr(self, "returnedFromSearchBox", False))):
+        if not self.is_entered_self(lines, getattr(self, "returnedFromSearchBox", False)):
             if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
                 # switch to another thread
                 # cannot call makeThread() here since we don't have the title line
