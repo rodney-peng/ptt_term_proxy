@@ -6,7 +6,8 @@ import socket
 import traceback
 import copy
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 from mitmproxy import http, ctx
 from mitmproxy.proxy import layer, layers
@@ -71,25 +72,33 @@ class PttFlow:
     class EventContext:
         dropContent: bool = False
         replaceContent: bytes = None
-        insertToClient: bytes = b''
-        sendToClient:   bytes = b''
-        insertToServer: bytes = b''
-        sendToServer:   bytes = b''
+        insertToClient: List[bytes] = field(default_factory=list)
+        sendToClient:   List[bytes] = field(default_factory=list)
+        insertToServer: List[bytes] = field(default_factory=list)
+        sendToServer:   List[bytes] = field(default_factory=list)
 
     def terminal_events(self, lets_do_it, evctx: EventContext):
         for event in lets_do_it:
 #            print("proxy.terminal:", event)
             if event._type == ProxyEvent.CUT_STREAM:
                 self.clientToServer = False
-                self.serverToClient = False
+                self.serverToClient = False  # also discard queued messages
                 if event.content > 0:
                     self.stream_resume_time = time.time() + event.content
                 else:
                     self.stream_resume_time = 0
             elif event._type == ProxyEvent.RESUME_STREAM:
                 self.clientToServer = True
-                self.serverToClient = True
+                self.serverToClient = True  # also discard queued messages
                 self.stream_resume_time = 0
+            elif event._type in [ProxyEvent.QUEUE_SERVER, ProxyEvent.DISCARD_SERVER]:
+                self.serverToClient = []
+            elif event._type == ProxyEvent.PURGE_SERVER:
+                if isinstance(self.serverToClient, list) and self.serverToClient:
+                    evctx.sendToClient.extend(self.serverToClient)
+                    self.serverToClient = []
+            elif event._type == ProxyEvent.RESUME_SERVER:
+                self.serverToClient = True  # also discard queued messages
             elif event._type == ProxyEvent.RUN_MACRO:
                 self.macro = event.content
                 print("Run macro:", event.content)
@@ -98,13 +107,13 @@ class PttFlow:
             elif event._type == ProxyEvent.REPLACE_CONTENT:
                 evctx.replaceContent = event.content
             elif event._type == ProxyEvent.INSERT_TO_CLIENT:
-                evctx.insertToClient += event.content
+                evctx.insertToClient.append(event.content)
             elif event._type == ProxyEvent.SEND_TO_CLIENT:
-                evctx.sendToClient += event.content
+                evctx.sendToClient.append(event.content)
             elif event._type == ProxyEvent.INSERT_TO_SERVER:
-                evctx.insertToServer += event.content
+                evctx.insertToServer.append(event.content)
             elif event._type == ProxyEvent.SEND_TO_SERVER:
-                evctx.sendToServer += event.content
+                evctx.sendToServer.append(event.content)
             elif event._type == ProxyEvent.REQ_SUBMENU_CACHED:
                 lets_do_it.send(self.macro_task is None or self.macro_task.done())
             elif event._type == ProxyEvent.WARNING:
@@ -126,14 +135,14 @@ class PttFlow:
             print("proxy.terminal.client:", event)
 
         if evctx.insertToClient or evctx.sendToClient:
-            self.sendToClient(evctx.insertToClient + evctx.sendToClient)
+            self.sendToClient(b''.join(evctx.insertToClient + evctx.sendToClient))
 
         if evctx.replaceContent:
             flow_msg.content = evctx.replaceContent
             print("proxy.client_message: replace", flow_msg.content)
 
         if evctx.insertToServer or evctx.sendToServer:
-            flow_msg.content = evctx.insertToServer + (flow_msg.content if not evctx.dropContent else b'') + evctx.sendToServer
+            flow_msg.content = b''.join(evctx.insertToServer + [(flow_msg.content if not evctx.dropContent else b'')] + evctx.sendToServer)
             print("proxy.client_message: alter", flow_msg.content)
         elif evctx.dropContent:
             print("proxy.client_message: drop", flow_msg.content)
@@ -177,21 +186,20 @@ class PttFlow:
             assert not evctx.dropContent
             assert evctx.replaceContent is None
             if evctx.insertToClient or evctx.sendToClient:
-                self.sendToClient(evctx.insertToClient + evctx.sendToClient)
+                self.sendToClient(b''.join(evctx.insertToClient + evctx.sendToClient))
             if evctx.insertToServer or evctx.sendToServer:
-                self.sendToServer(evctx.insertToServer + evctx.sendToServer)
+                self.sendToServer(b''.join(evctx.insertToServer + evctx.sendToServer))
 
     def server_message(self, flow_msg):
         evctx = self.EventContext()
 
         firstSegment = not self.msg_to_terminal
         lastSegment  = len(flow_msg.content) < 1021
+        content = flow_msg.content
 
-        '''
         if not lastSegment and flow_msg.content[-16:].decode("utf-8", "ignore").endswith("\x1b[%d;%dH" % self.terminal.size()):
             print("proxy.server_message: force purging", len(flow_msg.content))
             lastSegment = True
-        '''
 
         if firstSegment:
             lets_do_it = self.terminal.pre_server_message()
@@ -200,7 +208,10 @@ class PttFlow:
 
         self.msg_to_terminal += flow_msg.content
 
-        if not self.serverToClient:
+        if isinstance(self.serverToClient, list):
+            self.serverToClient.append(flow_msg.content)
+
+        if self.serverToClient is not True:
 #            print("proxy.server_message: cut", len(flow_msg.content))
             self.server_cut += len(flow_msg.content)
             flow_msg.content = b''
@@ -209,15 +220,19 @@ class PttFlow:
             self.purge_terminal_message(self.terminal_event, evctx)
 
             if evctx.sendToClient:
-                flow_msg.content += evctx.sendToClient
+#                print("proxy.server_message: sendToClient", [len(b) for b in evctx.sendToClient])
+                flow_msg.content += b''.join(evctx.sendToClient)
         else:
             self.terminal_event.set()
 
         if evctx.insertToServer or evctx.sendToServer:
-            self.sendToServer(evctx.insertToServer + evctx.sendToServer)
+#            print("proxy.server_message: insertToServer", [len(b) for b in evctx.insertToServer])
+#            print("proxy.server_message: sendToServer", [len(b) for b in evctx.sendToServer])
+            self.sendToServer(b''.join(evctx.insertToServer + evctx.sendToServer))
 
         if firstSegment and evctx.insertToClient:
-            flow_msg.content = evctx.insertToClient + flow_msg.content
+#            print("proxy.server_message: insertToClient", [len(b) for b in evctx.insertToClient])
+            flow_msg.content = b''.join(evctx.insertToClient) + flow_msg.content
 
     async def terminal_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):
         print("terminal_msg_timeout() started, socket opened:", (flow.websocket.timestamp_end is None))
@@ -241,7 +256,7 @@ class PttFlow:
             while not cancelled:
                 try:
                     # message could be purged during sleeping
-                    await asyncio.sleep(0.25)    # tried 0.1 but pending occasionally
+                    await asyncio.sleep(0.25)
                 except asyncio.CancelledError:
                     cancalled = True
                     break
@@ -274,7 +289,7 @@ class PttFlow:
             self.msg_to_server.append(data)    # from macro
         if not self.server_waiting: self.server_event.set()
 
-    server_msg_interval = 0.25   # seconds
+    server_msg_interval = 0.05   # seconds
 
     # rate-control for message to server
     async def server_msg_sender(self, flow: http.HTTPFlow, event: asyncio.Event):
@@ -357,7 +372,7 @@ class PttFlow:
         for event in self.terminal_events(lets_do_it, evctx):
             print("proxy.macro_done:", event)
         if evctx.insertToClient or evctx.sendToClient:
-            self.sendToClient(evctx.insertToClient + evctx.sendToClient)
+            self.sendToClient(b''.join(evctx.insertToClient + evctx.sendToClient))
 
     def show_task_exception(self, task):
         if task:

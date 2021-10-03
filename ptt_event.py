@@ -89,8 +89,12 @@ class ProxyEvent:
     RUN_MACRO = 0x70
 
     # data stream events
-    CUT_STREAM    = 0x80     # cut stream between server and client, only feed to the virtual terminal
-    RESUME_STREAM = 0x81     # resume stream
+    CUT_STREAM     = 0x80    # cut stream between server and client, only feed to the virtual terminal
+    RESUME_STREAM  = 0x81    # resume stream, discard queued messages
+    QUEUE_SERVER   = 0x82    # queue server messages
+    PURGE_SERVER   = 0x83    # send queued messages to client
+    DISCARD_SERVER = 0x84    # discard queued messages
+    RESUME_SERVER  = 0x85    # don't queue server messages
 
     # message content events
     DROP_CONTENT     = 0x90
@@ -114,6 +118,7 @@ class ProxyEvent:
     DRAW_CLIENT = 0x181
     DRAW_CURSOR = 0x182
     RESET_RENDITION = 0x183
+    COPY_SCREEN = 0x184     # copy terminal screen to client
 
     # terminal requests, needs to be forwarded along the generator-chain
     TERMINAL_REQUEST = 0x200
@@ -123,10 +128,10 @@ class ProxyEvent:
     REQ_SUBMENU_CACHED = 0x204
 
     no_arguments = { "FALSE", "TRUE", "OK",
-                     "RESUME_STREAM",
+                     "RESUME_STREAM", "QUEUE_SERVER", "PURGE_SERVER", "DISCARD_SERVER", "RESUME_SERVER",
                      "DROP_CONTENT",
                      "GET_GROUND",
-                     "DRAW_CURSOR", "RESET_RENDITION",
+                     "DRAW_CURSOR", "RESET_RENDITION", "COPY_SCREEN",
                      "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND", "REQ_SUBMENU_CACHED",
                    }
 

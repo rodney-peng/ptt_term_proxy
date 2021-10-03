@@ -232,7 +232,7 @@ class PttBoard(PttMenu):
             else:
                 yield from self.exit()
 
-    def post_update_self(self, returnFromSubMenu, y, x, lines):
+    def post_update_self(self, y, x, lines, entered = False):
         if lines[y].startswith('>'):
             self.cursorLine = lines[y]
             print(self.prefix(), "post_update_self", lines[y])

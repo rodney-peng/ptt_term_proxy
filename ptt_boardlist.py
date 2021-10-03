@@ -98,7 +98,7 @@ class PttBoardList(PttMenu):
         lets_do_no = self.exit()
         yield from self.lets_do_if(lets_do_it, lets_do_yes(), lets_do_no)
 
-    def post_update_self(self, returnFromSubMenu, y, x, lines):
+    def post_update_self(self, y, x, lines, entered = False):
         if lines[y].startswith('>'):
             self.cursorLine = lines[y]
             print(self.prefix(), "post_update_self", lines[y])

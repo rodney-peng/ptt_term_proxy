@@ -183,7 +183,7 @@ class PttMenu(PttMenuTemplate, ABC):
             yield from self.makeSubMenu(menu)
         yield from self.subMenuEntered()
         yield from self.subMenu.enter(y, x, lines)
-        yield from self.subMenu.post_update_self(False, y, x, lines)
+        yield from self.subMenu.post_update_self(y, x, lines, True)
 
     def post_update_is_submenu(self, y, x, lines):
         assert self.subMenu is None
@@ -191,10 +191,14 @@ class PttMenu(PttMenuTemplate, ABC):
             menu = self.subMenus[self.clientEvent]
             yield from self.lets_do_if(self.isSubMenuEntered(menu, lines), lets_do_yes = self.lets_do_new_subMenu(menu, y, x, lines))
 
+    def subMenuExiting(self, lines):
+        if False: yield
+
     # at this point, self state is still unknown.
     # e.g. searching board in a thread could jump to another board without returning to the parent.
     # the parent board only knows the thread exited but is unsure if it returns to itself until post_update_is_self().
     def lets_do_subMenuExited(self, y, x, lines):
+        yield from self.subMenuExiting(lines)
         self.subMenu = None
         if False: yield
 
@@ -208,8 +212,7 @@ class PttMenu(PttMenuTemplate, ABC):
         assert self.subMenu is None
         yield from self.lets_do_if(self.is_entered(lines), lets_do_no = self.exit())
 
-    # TODO: Is returnFromSubMenu still necessary?
-    def post_update_self(self, returnFromSubMenu, y, x, lines):
+    def post_update_self(self, y, x, lines, entered = False):
         if False: yield
 
     def post_update(self, y, x, lines):
@@ -229,7 +232,7 @@ class PttMenu(PttMenuTemplate, ABC):
         yield from self.post_update_is_self(y, x, lines)
         if self.subMenu or self.exited: return
 
-        yield from self.post_update_self(self.__subMenuExited, y, x, lines)
+        yield from self.post_update_self(y, x, lines)
 
         # TODO: necessary or not?
         yield from super().post_update(y, x, lines)

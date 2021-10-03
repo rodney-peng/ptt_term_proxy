@@ -29,6 +29,7 @@ class MyScreen(pyte.Screen):
         if ord(char) > 0xff:
             super().draw('')
 
+    # TODO: italic/blink ...
     def rawData(self, y, x, fg: str = "", bg: str = "", bold: bool = False):
         data = self.buffer[y][x]
 #        print("rawData:", y, x, data)
@@ -421,6 +422,11 @@ class PttTerminal:
         elif event._type == ProxyEvent.RESET_RENDITION:
             data = self.selectGraphic()
             yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+        elif event._type == ProxyEvent.COPY_SCREEN:
+            rows, cols = self.size()
+            for row in range(1, rows+1):
+                data = self.screenData(ClientContext(row, 1, length=cols))
+                yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
         else:
             yield ProxyEvent.warning(event)
 

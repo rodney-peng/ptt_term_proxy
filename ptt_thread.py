@@ -145,6 +145,9 @@ class PttThread(PttMenu):
 
         if self.key: self._prefix = self.keyToPrefix(self.board.name, self.key)
 
+        self.enterTriggers = []
+        self.updateTriggers = []
+
         self.lines = []
         self.lastLine = 0
 
@@ -202,15 +205,25 @@ class PttThread(PttMenu):
     enteringTriggers = []
 
     @classmethod
-    def addEnteringTrigger(cls, event):
+    def setEnteringTrigger(cls, event):
         cls.enteringTriggers.append(event)
 
-    @classmethod
-    def lets_do_enteringTrigger(cls):
-        for event in cls.enteringTriggers:
+    def setEnterTrigger(self, event):
+        self.enterTriggers.append(event)
+
+    def setUpdateTrigger(self, event):
+        self.updateTriggers.append(event)
+
+    def lets_do_enteringTrigger(self):
+        for event in type(self).enteringTriggers:
             print("PttThread.enteringTrigger", event)
             yield event
-        cls.enteringTriggers = []
+        type(self).enteringTriggers = []
+
+        for event in self.enterTriggers:
+            print(self.prefix(), "enterTrigger", event)
+            yield event
+        self.enterTriggers = []
 
     def enter(self, y, x, lines):
         returned = getattr(self, "returned", False)
@@ -242,7 +255,7 @@ class PttThread(PttMenu):
         # to re-enter the thread once it exited
         # don't yield directly as 'q' and 'r' almost arriving at the same time may confuse the server
         self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
-        self.addEnteringTrigger(ProxyEvent.resume_stream)
+        self.setEnteringTrigger(ProxyEvent.resume_stream)
 
     def transfer(self, from_thread):
         if self is from_thread:
@@ -352,18 +365,37 @@ class PttThread(PttMenu):
         else:
             yield from super().isSubMenuEntered(menu, lines)
 
-    def lets_do_subMenuExited(self, y, x, lines):
-        if isinstance(self.subMenu, ThreadInfo) or \
-           (isinstance(self.subMenu, SearchBoard) and self.board.is_entered_self(lines)):
-#            yield ProxyEvent.cut_stream(3)     # cut too late
-            # back to the thread
-            self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
-            if self.viewedFirstLine > 1:
-                # back to the position
-                self.addEnteringTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
-#            self.addEnteringTrigger(ProxyEvent.resume_stream)      # resume too soon
+    def subMenuEntered(self):
+        yield from super().subMenuEntered()
 
-        yield from super().lets_do_subMenuExited(y, x, lines)
+        if isinstance(self.subMenu, (ThreadInfo, SearchBoard)):
+            yield ProxyEvent.queue_server
+
+    def post_update_submenu(self, y, x, lines):
+        server_queued = isinstance(self.subMenu, (ThreadInfo, SearchBoard))
+        yield from super().post_update_submenu(y, x, lines)
+        if server_queued:
+            if self.subMenu:
+                yield ProxyEvent.purge_server
+            elif not self.board.is_entered_self(lines):
+                # switch to another board
+                yield ProxyEvent.purge_server
+                yield ProxyEvent.resume_server
+            else:
+                # exit to the board
+                yield ProxyEvent.discard_server
+                yield ProxyEvent.cut_stream(2)
+
+                # back to the thread
+                self.resume_event = ProxyEvent.event_to_server(ClientEvent.r)
+                if self.viewedFirstLine > 1:
+                    # back to the position
+                    self.setEnterTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
+                    self.setUpdateTrigger(ProxyEvent.copy_screen)
+                    self.setUpdateTrigger(ProxyEvent.resume_stream)
+                else:
+                    self.setEnterTrigger(ProxyEvent.copy_screen)
+                    self.setEnterTrigger(ProxyEvent.resume_stream)
 
     re_match_browse_line = (lambda line: re.match("瀏覽.+\(\s*?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", line.lstrip()))
 
@@ -377,7 +409,14 @@ class PttThread(PttMenu):
         else:
             yield from super().post_update_is_self(y, x, lines)
 
-    def post_update_self(self, returnFromSubMenu, y, x, lines):
+    def post_update_self(self, y, x, lines, entered = False):
+        if not entered:
+            for event in self.updateTriggers:
+                print(self.prefix(), "updateTrigger", event)
+                yield event
+            self.updateTriggers = []
+
+        # must follow updateTriggers
         yield from self.lets_do_view(lines)
 
     re_push_msg = "(推|噓|→) [0-9A-Za-z]+\s*:"
