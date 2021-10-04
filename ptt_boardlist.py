@@ -45,9 +45,9 @@ class PttBoardList(PttMenu):
         else:
             self.cursorLine = ""
 
-    def pre_update_self(self, y, x, lines):
+    def pre_update_self(self, y, x, lines, **kwargs):
         self.cursorLine = lines[y]
-        yield from super().pre_update_self(y, x, lines)
+        yield from super().pre_update_self(y, x, lines, **kwargs)
 
     subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
                  ClientEvent.Ctrl_S: SearchBoard,

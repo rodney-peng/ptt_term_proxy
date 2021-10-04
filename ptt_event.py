@@ -33,7 +33,9 @@ class UserEvent:
         return ' ' <= chr(event) <= '~'
 
     @classmethod
-    def name(cls, event: int):
+    def name(cls, event: Union[int, str]):
+        if isinstance(event, str):
+            return f"'{event}'"
         assert event >= 0
         if cls.isViewable(event):
             return f"'{chr(event)}'"
@@ -114,6 +116,8 @@ class ProxyEvent:
     BANNED_LINE = 0x106
     SET_GROUND = 0x107
     GET_GROUND = 0x108
+    ADD_TAG = 0x109
+    DEL_TAG = 0x10a
 
     DRAW_CLIENT = 0x181
     DRAW_CURSOR = 0x182

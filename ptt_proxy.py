@@ -202,7 +202,7 @@ class PttFlow:
             lastSegment = True
 
         if firstSegment:
-            lets_do_it = self.terminal.pre_server_message()
+            lets_do_it = self.terminal.pre_server_message(flow_msg.content[:32])
             for event in self.terminal_events(lets_do_it, evctx):
                 print("proxy.terminal.pre_server:", event)
 

@@ -131,9 +131,9 @@ class PttMenu(PttMenuTemplate, ABC):
         else:
             yield from super().client_event(event)
 
-    def pre_update_submenu(self, y, x, lines):
+    def pre_update_submenu(self, y, x, lines, **kwargs):
         assert self.subMenu is not None
-        lets_do_update =  self.subMenu.pre_update(y, x, lines)
+        lets_do_update =  self.subMenu.pre_update(y, x, lines, **kwargs)
         lets_do_exit = self.lets_do_subMenuExited(y, x, lines)
         yield from self.lets_do_if_return(lets_do_update, lets_do_exit)
 
@@ -143,14 +143,14 @@ class PttMenu(PttMenuTemplate, ABC):
     def pre_update_is_self(self, y, x, lines):
         if False: yield
 
-    def pre_update_self(self, y, x, lines):
+    def pre_update_self(self, y, x, lines, **kwargs):
         if False: yield
 
-    def pre_update(self, y, x, lines):
+    def pre_update(self, y, x, lines, **kwargs):
         self.__pre_updated = True
         self.__subMenuExited = False
         if self.subMenu:
-            yield from self.pre_update_submenu(y, x, lines)
+            yield from self.pre_update_submenu(y, x, lines, **kwargs)
             #if self.subMenu: return
             if self.subMenu is None:
                 self.__subMenuExited = True
@@ -163,7 +163,7 @@ class PttMenu(PttMenuTemplate, ABC):
             yield from self.pre_update_is_self(y, x, lines)
             if self.exited: return
 
-        yield from self.pre_update_self(y, x, lines)
+        yield from self.pre_update_self(y, x, lines, **kwargs)
         yield from super().pre_update(y, x, lines)
 
     def isSubMenuEntered(self, menu, lines):
@@ -337,7 +337,7 @@ def test(menu):
         print(event)
     for event in menu.client_event(ClientEvent.Space):
         print(event)
-    for event in menu.pre_update(0, 0, lines):
+    for event in menu.pre_update(0, 0, lines, peekData='1234'):
         print(event)
     for event in menu.post_update(0, 0, lines):
         print(event)

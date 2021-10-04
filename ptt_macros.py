@@ -13,10 +13,10 @@ pmore_config = [
     # no onboarding screen if jumps from searching in a board?
     PttMacro( FromLastState, b'pttnewhand\r', [PttBoardList, OnBoardingScreen, PttBoard] ),
     # if in onboarding screen, skips
-    PttMacro( FromLastState, {PttBoardList: b'\r', OnBoardingScreen: b'\x1b[A'}, [PttBoard] ),
+    PttMacro( FromLastState, {PttBoardList: b'\r', OnBoardingScreen: b'\x1b[A'}, [PttBoard], wait=0.5 ),
     # if enters the board from board list, onboarding screen will be in [PttBoard] state,
     # send an 'Up' to skip the onboarding screen
-    PttMacro( FromLastState, b'\x1b[A', [PttBoard] ),
+    PttMacro( FromLastState, b'\x1b[A', [PttBoard], wait=0.5 ),
     # enters the thread at cursor or retry after page up if the thread has been deleted
     PttMacro( FromLastState, b'\r', [PttThread, PttBoard], timeout=True, resend=b'\x1b[5~', retry=5 ),
     PttMacro( [PttThread],   b'o',      [ThreadOption] ),    # enters browser configuration

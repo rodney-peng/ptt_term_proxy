@@ -101,15 +101,20 @@ class ProxyCommand(PttMenu):
                  "unban\s+([0-9]+)": (lambda matched: ProxyEvent.unban_floor(int(matched.group(1)))),
                  # for thread without explicit url
                  "ground\s+([0-9]+)": (lambda matched: ProxyEvent.set_ground(int(matched.group(1)))),
+                 "tag\s+([^\s].+)$": (lambda matched: ProxyEvent.add_tag(matched.group(1))),
+                 "untag\s+([^\s].+)$": (lambda matched: ProxyEvent.del_tag(matched.group(1))),
                }
 
     def client_event(self, event: ClientEvent):
         yield from super().client_event(event)
-#        yield ProxyEvent.drop_content
-        if ClientEvent.isViewable(event):
+        if isinstance(event, str) or ClientEvent.isViewable(event):
             if len(self.input) < self.CommandMaxLen:
-                self.input += chr(event)
-                yield ProxyEvent.event_to_client(event)  # echo
+                if isinstance(event, str):
+                    self.input += event
+                    yield ProxyEvent.draw_client(ClientContext(content=event))  # echo
+                else:
+                    self.input += chr(event)
+                    yield ProxyEvent.event_to_client(event)  # echo
 
                 # send current ground for convenience
                 if self.input.lstrip() == "ground ":
@@ -161,6 +166,8 @@ class PttThread(PttMenu):
         self.groundLine = 0
         self.floors = []
         self.bannedFloors = {}
+
+        self.tags = {}
 
         # TODO: use datetime.timedelta
         self.firstVisited = self.lastVisited = 0  # Epoch time
@@ -272,7 +279,7 @@ class PttThread(PttMenu):
 
     def client_event(self, event: ClientEvent):
         class Commands:
-            Names = ["BAN_FLOOR", "UNBAN_FLOOR", "SET_GROUND", "GET_GROUND"]
+            Names = ["BAN_FLOOR", "UNBAN_FLOOR", "SET_GROUND", "GET_GROUND", "ADD_TAG", "DEL_TAG"]
             Commands = {getattr(ProxyEvent, name): getattr(self, name.lower()) for name in Names}
 
             @classmethod
@@ -462,6 +469,28 @@ class PttThread(PttMenu):
 
     def get_ground(self, lets_do_it, none = None):
         lets_do_it.send(self.groundLine if self.groundLine else self.viewedFirstLine)
+
+    def banned_count(self):
+        return len(self.bannedFloors)
+
+    def tag_count(self):
+        return len(self.tags)
+
+    @staticmethod
+    def get_tags(tags):
+        return [tag.strip() for tag in tags.replace('，', ',').split(',') if tag.strip()]
+
+    def add_tag(self, lets_do_it, tags):
+        print(self.prefix(), "add_tag", self.get_tags(tags))
+        for tag in self.get_tags(tags):
+            if tag not in self.tags:
+                self.tags[tag] = time.time()
+
+    def del_tag(self, lets_do_it, tags):
+        print(self.prefix(), "del_tag", self.get_tags(tags))
+        for tag in self.get_tags(tags):
+            if tag in self.tags:
+                del self.tags[tag]
 
     def ban_line(self, line: int, yield_line: bool = False, cursor_return: bool = False):
         def line_width(text):

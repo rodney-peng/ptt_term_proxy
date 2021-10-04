@@ -25,6 +25,7 @@ class PttMacro:
     retry: int = 0
     row: int = 0
     pattern: str = None
+    wait: float = 0.0
 
     # return value:
     #   False: to break
@@ -74,6 +75,9 @@ class PttMacro:
         done = False
         error = None
         while not done and error is None:
+            if self.wait > 0:
+                await asyncio.sleep(self.wait)
+
             if ctx.resend:
                 sendToServer(ctx.resend, False)
             elif isinstance(self.send, bytes):

@@ -1,7 +1,7 @@
 import re
 import time
 
-from ptt_event import ProxyEvent, ClientEvent
+from ptt_event import ProxyEvent, ClientEvent, ClientContext
 from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry, WhereAmI
 from ptt_thread import PttThread
 
@@ -68,6 +68,7 @@ class PttBoard(PttMenu):
         super().reset()
         self._prefix = self.name
         self.onboarding = False
+        self.firstKey = None
         self.threads = {}
 
         # TODO: use datetime.timedelta
@@ -110,9 +111,9 @@ class PttBoard(PttMenu):
         if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
-    def pre_update(self, y, x, lines):
+    def pre_update(self, y, x, lines, **kwargs):
         if not self.onboarding:
-            yield from super().pre_update(y, x, lines)
+            yield from super().pre_update(y, x, lines, **kwargs)
 
     def post_update(self, y, x, lines):
         if self.onboarding:
@@ -120,20 +121,28 @@ class PttBoard(PttMenu):
         if not self.onboarding:
             yield from super().post_update(y, x, lines)
 
-    def makeThread(self, line, cached, thread = None):
+    def pre_update_pre_submenu(self, y, x, lines):
+        if hasattr(self, "resumingSubMenu"): return
+        yield from self.clear_marks(lines)
+
+    @staticmethod
+    def thread_key(line):
         if '★' in line[:6]:
-            prefix = "******"
-            line = line[6:]
-        else:
-            prefix = line[1:7]
+            prefix = "****** "
             line = line[7:]
-
-        if '爆' in line[:4]:
-            line = line[3:]
         else:
-            line = line[4:]
+            prefix = line[1:8]
+            line = line[8:]
 
-        key = prefix + line.rstrip()
+        if '爆' in line[:2]:
+            line = line[2:]
+        else:
+            line = line[3:]
+
+        return prefix + line.rstrip()
+
+    def makeThread(self, line, cached, thread = None):
+        key = self.thread_key(line)
         print(f"makeThread = '{key}' {thread} {key in self.threads}")
         if key in self.threads:
             if thread: self.threads[key].transfer(thread)
@@ -146,9 +155,21 @@ class PttBoard(PttMenu):
             if cached: self.threads[key] = thread
         return thread
 
-    def pre_update_self(self, y, x, lines):
+    re_cursorToBegin = b'\x1b\[[1-9]\d*;1H'
+    re_cursorUpDown  = b'(\n+|' + re_cursorToBegin + b')'
+
+    def pre_update_self(self, y, x, lines, **kwargs):
         self.cursorLine = lines[y]
-        yield from super().pre_update_self(y, x, lines)
+        if hasattr(self, "resumingSubMenu"): return
+
+        if 'peekData' in kwargs:
+            peekData = kwargs['peekData']
+            cursorUp = re.match(self.re_cursorToBegin + b'>\r' + self.re_cursorUpDown + b' ' + self.re_cursorToBegin, peekData) is not None
+            cursorDown = re.match(b' \r' + self.re_cursorUpDown + b'>\r', peekData) is not None
+            if not cursorUp and not cursorDown:
+                yield from self.clear_marks(lines)
+
+        yield from super().pre_update_self(y, x, lines, **kwargs)
 
     subMenus = { ClientEvent.Ctrl_Z: QuickSwitch,
                  ClientEvent.s: SearchBoard,
@@ -221,6 +242,8 @@ class PttBoard(PttMenu):
         yield from super().lets_do_subMenuExited(y, x, lines)
         if resume_event: yield resume_event
 
+        self.firstKey = None
+
     def post_update_is_self(self, y, x, lines):
         if not self.is_entered_self(lines, getattr(self, "returnedFromSearchBox", False)):
             if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
@@ -236,8 +259,62 @@ class PttBoard(PttMenu):
         if lines[y].startswith('>'):
             self.cursorLine = lines[y]
             print(self.prefix(), "post_update_self", lines[y])
-        if False: yield
 
+        if hasattr(self, "resumingSubMenu"): return
+        yield from self.mark_threads(lines)
+
+    FirstRow = 4
+    MinColumns = 108
+    MaxWidth = 8
+
+    def mark_threads(self, lines):
+        firstKey = self.thread_key(lines[self.FirstRow])
+        if self.firstKey and self.firstKey == firstKey: return
+        self.firstKey = firstKey
+
+        columns = yield ProxyEvent.req_screen_column
+        assert columns is not None
+        yield ProxyEvent.ok
+        if columns < self.MinColumns: return
+
+        n = 0
+        row = self.FirstRow
+        col = self.MinColumns - self.MaxWidth
+        for line in lines[self.FirstRow-1 : -1]:
+            mark = ''
+            key = self.thread_key(line)
+            if key in self.threads:
+                thread = self.threads[key]
+                add_mark = (lambda _str, _mark: (_str + '/').lstrip('/') + _mark)
+                if thread.tag_count(): mark = add_mark(mark, 'T')
+                if thread.banned_count(): mark = add_mark(mark, 'B')
+                if not mark: mark = 'V'
+                content = "{:{width}}".format(mark, width = self.MaxWidth)
+                yield ProxyEvent.draw_client(ClientContext(row, col, content, fg="brown", bold=True))
+                n += 1
+            row += 1
+        if n:
+            yield ProxyEvent.reset_rendition
+            yield ProxyEvent.draw_cursor
+
+    def clear_marks(self, lines):
+        columns = yield ProxyEvent.req_screen_column
+        assert columns is not None
+        yield ProxyEvent.ok
+        if columns < self.MinColumns: return
+
+        n = 0
+        row = self.FirstRow
+        col = self.MinColumns - self.MaxWidth
+        for line in lines[self.FirstRow-1 : -1]:
+            key = self.thread_key(line)
+            if key in self.threads:
+                yield ProxyEvent.draw_client(ClientContext(row, col, ' ' * self.MaxWidth, fg="default"))
+                n += 1
+            row += 1
+        if n:
+            yield ProxyEvent.reset_rendition
+            yield ProxyEvent.draw_cursor
 
 if __name__ == "__main__":
     from ptt_menu import test

@@ -242,6 +242,10 @@ class PttTerminal:
                     state = sESC
                 elif b == IAC:
                     state = IAC
+                elif b > 0x7f and len(content) > n+1:
+                    # double-byte character
+                    handler = self.client_event(content[n:n+2].decode("big5uao", 'replace'))
+                    n += 1
                 else:
                     handler = self.client_event(b)
             elif state == sESC:
@@ -353,11 +357,11 @@ class PttTerminal:
 
         if False: yield
 
-    def pre_server_message(self):
+    def pre_server_message(self, peekData):
         if self.menu:
             y, x, line = self.cursor()
             lines = self.screen.display
-            lets_do_it = self.menu.pre_update(y, x, lines)
+            lets_do_it = self.menu.pre_update(y, x, lines, peekData=peekData)
             for event in lets_do_it:
                 yield from self.lets_do_terminal_event(lets_do_it, event, True)
 
