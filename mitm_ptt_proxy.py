@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import re
 
 '''
     A customized mitmdump that has preconfigured options and can capture signals and watch connections.
@@ -216,33 +217,34 @@ class myDumpMaster(DumpMaster):
             except Exception:
                 pass
 
-        delete_module('ptt_terminal')
-        delete_module('ptt_boardlist')
-        delete_module('ptt_board')
-        delete_module('ptt_thread')
-        delete_module('ptt_menu')
-        delete_module('ptt_event')
-        delete_module('ptt_macro')
-        delete_module('ptt_macros')
-
-        import glob
-        for f in glob.glob("__pycache__/*"):
+        def delete_file(name):
             try:
-                os.remove(f)
-                print("removed file:", f)
+                os.remove(name)
+                print("removed file:", name)
             except Exception:
                 pass
+
+        import glob
+        files = glob.glob("__pycache__/*")
+        modules = [re.match('__pycache__/([^.]+)', f).group(1) for f in files]
+        if 'ptt_proxy' in modules: modules.remove('ptt_proxy')
+
+        for _ in map(delete_module, modules): pass
+        for _ in map(delete_file, files): pass
 
         from importlib import reload
 
         self.addons.remove(self.ptt_proxy)
-
         oldproxy = self.ptt_proxy.addons[0]
 
-        self.ptt_proxy = reload(ptt_proxy)
-
-        self.addons.add(self.ptt_proxy)     # invoke LoadHook
-        self.ptt_proxy.reload(oldproxy)
+        try:
+            self.ptt_proxy = reload(ptt_proxy)
+        except Exception:
+            self.addons.add(self.ptt_proxy)
+            traceback.print_exc()
+        else:
+            self.addons.add(self.ptt_proxy)     # invoke LoadHook
+            self.ptt_proxy.reload(oldproxy)
 
     async def conn_watcher(self):
         from mitmproxy.proxy.server import TimeoutWatchdog

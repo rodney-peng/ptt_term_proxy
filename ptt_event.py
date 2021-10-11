@@ -111,13 +111,19 @@ class ProxyEvent:
     RETURN = 0x101      # menu return
     BOARD_NAME = 0x102
     THREAD_URL = 0x103
-    BAN_FLOOR = 0x104
-    UNBAN_FLOOR = 0x105
-    BANNED_LINE = 0x106
-    SET_GROUND = 0x107
-    GET_GROUND = 0x108
-    ADD_TAG = 0x109
-    DEL_TAG = 0x10a
+    COMMAND = 0x104
+
+    BAN_FLOOR = 0x110
+    UNBAN_FLOOR = 0x111
+    BANNED_LINE = 0x112
+    SET_GROUND = 0x113
+    GET_GROUND = 0x114
+    ADD_TAG = 0x115
+    DEL_TAG = 0x116
+
+    GOTO_VIEWED = 0x120
+    GOTO_TAGGED = 0x121
+    GOTO_BANNED = 0x122
 
     DRAW_CLIENT = 0x181
     DRAW_CURSOR = 0x182

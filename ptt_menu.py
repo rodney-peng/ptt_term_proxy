@@ -332,15 +332,18 @@ class WhereAmI(PttMenu):
 def test(menu):
     lines = [""]*10
     for event in menu.is_entered(lines):
-        print(event)
+        print("is_entered", event)
     for event in menu.enter(0, 0, lines):
-        print(event)
+        print("enter", event)
     for event in menu.client_event(ClientEvent.Space):
-        print(event)
-    for event in menu.pre_update(0, 0, lines, peekData='1234'):
-        print(event)
+        print("client_event", event)
+    lets_do_it = menu.pre_update(0, 0, lines, peekData=b'1234')
+    for event in lets_do_it:
+        print("pre_update", event)
+        if event._type == ProxyEvent.REQ_SCREEN_COLUMN:
+            lets_do_it.send(128)
     for event in menu.post_update(0, 0, lines):
-        print(event)
+        print("post_update", event)
     # exit() will be called in post_update() as the lines are blank
     #for event in info.exit():
     #    print(event)

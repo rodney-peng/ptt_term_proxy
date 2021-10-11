@@ -123,6 +123,7 @@ class PttFlow:
 
     def client_message(self, flow_msg):
         print('\n')
+        ctx.log.info("client_message " + str(flow_msg.content))
         client_msg = flow_msg.content
         if not ctx.master.is_self_injected(flow_msg) and not self.clientToServer:
 #            print("proxy.client_message: cut", flow_msg.content)
@@ -151,6 +152,11 @@ class PttFlow:
     def purge_terminal_message(self, event: asyncio.Event, evctx: EventContext = None):
         if len(self.msg_to_terminal) == 0:
             raise AssertionError("Purging terminal message but there is none!!!")
+        if len(self.msg_to_terminal) < 100:
+            ctx.log.info("server_message " + str(self.msg_to_terminal))
+        else:
+            ctx.log.info("server_message (%d)" % len(self.msg_to_terminal))
+
         event.clear()
 
         out_of_band = evctx is None
@@ -202,7 +208,7 @@ class PttFlow:
             lastSegment = True
 
         if firstSegment:
-            lets_do_it = self.terminal.pre_server_message(flow_msg.content[:32])
+            lets_do_it = self.terminal.pre_server_message(flow_msg.content[:80])
             for event in self.terminal_events(lets_do_it, evctx):
                 print("proxy.terminal.pre_server:", event)
 

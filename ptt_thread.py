@@ -8,6 +8,29 @@ register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent, ClientContext
 from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
+from ptt_command import CommandBox
+
+
+class ThreadCommandBox(CommandBox):
+
+    Patterns = { "ban\s+([0-9]+)":   (lambda matched: ProxyEvent.ban_floor(int(matched.group(1)))),
+                 "unban\s+([0-9]+)": (lambda matched: ProxyEvent.unban_floor(int(matched.group(1)))),
+                 # for thread without explicit url
+                 "ground\s+([0-9]+)": (lambda matched: ProxyEvent.set_ground(int(matched.group(1)))),
+                 "tag\s+([^\s].+)$": (lambda matched: ProxyEvent.add_tag(matched.group(1))),
+                 "untag\s+([^\s].+)$": (lambda matched: ProxyEvent.del_tag(matched.group(1))),
+               }
+
+    def post_client_event(self):
+        # send current ground for convenience
+        if self.input.lstrip() == "ground ":
+            ground = yield ProxyEvent.get_ground
+            assert ground is not None
+            yield ProxyEvent.ok
+            ground = str(ground)
+            if len(self.input + ground) < self.CommandMaxLen:
+                self.input += ground
+                yield ProxyEvent.draw_client(ClientContext(content=ground))
 
 
 class ThreadOption(PttMenu):
@@ -64,78 +87,6 @@ class Animation(PttMenu):
                   "動畫播放中" in lines[-1] )
 
 
-class ProxyCommand(PttMenu):
-
-    @staticmethod
-    def is_entered(lines):
-        yield ProxyEvent.true
-
-    # The command box must only use the last line as a command may alter the content on the screen except the last line
-    CommandRow = -1
-    CommandCol = 60
-    CommandPrompt = "Command:"
-    CommandMaxLen = CommandCol - len(CommandPrompt)
-
-    def enter(self, y, x, lines):
-        yield from super().enter(y, x, lines)
-
-        yield ProxyEvent.cut_stream(0)
-
-        self.input = ""
-        self.screenData = yield ProxyEvent.req_screen_data(ClientContext(self.CommandRow, 1, length=self.CommandCol))
-        assert self.screenData is not None
-        yield ProxyEvent.ok
-
-        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1, self.CommandPrompt, fg="white", bg="black"))
-        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8, " " * self.CommandMaxLen, fg="white", bg="black", bold=True))
-        yield ProxyEvent.draw_client(ClientContext(self.CommandRow, 1+8))
-
-    def exit(self):
-        yield from super().exit()
-        yield ProxyEvent.send_to_client(self.screenData)
-        yield ProxyEvent.reset_rendition
-        yield ProxyEvent.draw_cursor
-        yield ProxyEvent.resume_stream
-
-    Commands = { "ban\s+([0-9]+)":   (lambda matched: ProxyEvent.ban_floor(int(matched.group(1)))),
-                 "unban\s+([0-9]+)": (lambda matched: ProxyEvent.unban_floor(int(matched.group(1)))),
-                 # for thread without explicit url
-                 "ground\s+([0-9]+)": (lambda matched: ProxyEvent.set_ground(int(matched.group(1)))),
-                 "tag\s+([^\s].+)$": (lambda matched: ProxyEvent.add_tag(matched.group(1))),
-                 "untag\s+([^\s].+)$": (lambda matched: ProxyEvent.del_tag(matched.group(1))),
-               }
-
-    def client_event(self, event: ClientEvent):
-        yield from super().client_event(event)
-        if isinstance(event, str) or ClientEvent.isViewable(event):
-            if len(self.input) < self.CommandMaxLen:
-                if isinstance(event, str):
-                    self.input += event
-                    yield ProxyEvent.draw_client(ClientContext(content=event))  # echo
-                else:
-                    self.input += chr(event)
-                    yield ProxyEvent.event_to_client(event)  # echo
-
-                # send current ground for convenience
-                if self.input.lstrip() == "ground ":
-                    ground = yield ProxyEvent.get_ground
-                    assert ground is not None
-                    yield ProxyEvent.ok
-                    ground = str(ground)
-                    if len(self.input + ground) < self.CommandMaxLen:
-                        self.input += ground
-                        yield ProxyEvent.draw_client(ClientContext(content=ground))
-        elif event == ClientEvent.Backspace:
-            if self.input:
-                self.input = self.input[:-1]
-                yield ProxyEvent.send_to_client(b'\b \b')
-        elif event == ClientEvent.Enter:
-            for cmd, event in self.Commands.items():
-                matched = re.match(cmd, self.input.strip())
-                if matched:
-                    yield event(matched)
-                    break
-            yield from self.exit()
 
 # a PTT thread being viewed
 class PttThread(PttMenu):
@@ -292,7 +243,7 @@ class PttThread(PttMenu):
                 cls.lets_do_it = lets_do_it
                 return {getattr(ProxyEvent, name): cls() for name in cls.Names}
 
-        if isinstance(self.subMenu, ProxyCommand):
+        if isinstance(self.subMenu, ThreadCommandBox):
             lets_do_it = super().client_event(event)
             lets_do_exit = self.lets_do_subMenuExited(0, 0, [' '])
             yield from self.lets_do_if_return(lets_do_it, lets_do_exit, Commands.watched(lets_do_it))
@@ -304,7 +255,7 @@ class PttThread(PttMenu):
                 yield ProxyEvent.drop_content
             elif self.clientEvent == ClientEvent.x:
                 yield ProxyEvent.drop_content
-                yield from self.lets_do_new_subMenu(ProxyCommand, 0, 0, [' '])
+                yield from self.lets_do_new_subMenu(ThreadCommandBox, 0, 0, [' '])
 
     def pre_update_pre_submenu(self, y, x, lines):
         if self.floorInView:
@@ -354,7 +305,7 @@ class PttThread(PttMenu):
                  ClientEvent.Key9: JumpToPosition,
                  ClientEvent.Colon:     JumpToPosition,
                  ClientEvent.SemiColon: JumpToPosition,
-                 #ClientEvent.x: ProxyCommand,  # not work here since server won't send any data after 'x'
+                 #ClientEvent.x: ThreadCommandBox,  # not work here since server won't send any data after 'x'
                }
 
     def isSubMenuEntered(self, menu, lines):
@@ -431,7 +382,7 @@ class PttThread(PttMenu):
     def ban_floor(self, lets_do_it, floor: int):
         if 0 < floor <= len(self.floors) and floor not in self.bannedFloors:
             line = self.floors[floor-1]
-            lets_do_it = self.ban_line(line, True)  # no need to return the cursor as ProxyCommand.exit() will do
+            lets_do_it = self.ban_line(line, True)  # no need to return the cursor as ThreadCommandBox.exit() will do
             def add_banned_floor(event):
                 self.bannedFloors[floor] = event.content
 #                print(self.prefix(), "banned %d: '%s'" % (floor, event.content))

@@ -1,9 +1,27 @@
 import re
 import time
+import traceback
+
+from sortedcontainers import SortedDict
 
 from ptt_event import ProxyEvent, ClientEvent, ClientContext
 from ptt_menu import PttMenu, SearchBoard, SearchBox, QuickSwitch, HelpScreen, ThreadInfo, JumpToEntry, WhereAmI
 from ptt_thread import PttThread
+from ptt_command import CommandBox
+
+
+class BoardCommandBox(CommandBox):
+
+    Commands = { 'f': (lambda command: ProxyEvent.goto_viewed('first')),
+                 'l': (lambda command: ProxyEvent.goto_viewed('last')),
+                 'p': (lambda command: ProxyEvent.goto_viewed('prev')),
+                 'n': (lambda command: ProxyEvent.goto_viewed('next')),
+               }
+
+    Patterns = { "viewed\s+(-?[0-9]+|\w+)": (lambda matched: ProxyEvent.goto_viewed(matched.group(1))),
+                 "tagged\s+(-?[0-9]+|\w+)": (lambda matched: ProxyEvent.goto_tagged(matched.group(1))),
+                 "banned\s+(-?[0-9]+|\w+)": (lambda matched: ProxyEvent.goto_banned(matched.group(1))),
+               }
 
 
 class BoardInfo(PttMenu):
@@ -18,6 +36,18 @@ class OnboardingScreen(PttMenu):
     @staticmethod
     def is_entered(lines):
         yield ProxyEvent.as_bool("動畫播放中" in lines[-1] or "請按任意鍵繼續" in lines[-1])
+
+
+class ReadUnreadConfig(PttMenu):
+
+    @staticmethod
+    def is_entered(lines):
+        bg = yield ProxyEvent.req_cursor_background
+        assert bg is not None
+        yield ProxyEvent.ok
+
+        yield ProxyEvent.as_bool(bg == "white" and \
+                  lines[-4].startswith("設定已讀未讀記錄") and lines[-2].startswith("設定所有文章"))
 
 
 class PostThread(PttMenu):
@@ -57,6 +87,50 @@ class PostThread(PttMenu):
     subMenus = { ClientEvent.Ctrl_Z: PostHelp,
                  ClientEvent.Ctrl_G: PostTemplate }
 
+class SortedThreads(SortedDict):
+
+    def viewed(self, index, cursor = None):
+        if not self: return None
+        keys = self.keys()
+        if index == 'first':
+            nindex = 0
+        elif index == 'last':
+            nindex = -1
+        elif index in ['prev', 'next']:
+            if cursor is None: return None
+            if cursor not in keys:
+                if cursor < keys[0] or cursor > keys[-1]:
+                    nindex = -1 if index == 'prev' else 0
+                else:
+                    i = 0
+                    while cursor > keys[i]: i += 1
+                    nindex = i-1 if index == 'prev' else i
+            else:
+                if index == 'prev':
+                    nindex = self.index(cursor) - 1
+                else:
+                    nindex = (self.index(cursor) + 1) % len(self)
+        else:
+            try:
+                nindex = int(index)
+            except Exception:
+                traceback.print_exc()
+                return None
+        try:
+            key = keys[nindex]
+        except Exception:
+            traceback.print_exc()
+            return None
+        if key[:7].strip().isdecimal():
+            return key[:7].strip().encode() + b'\r'
+        else:
+            return b'\x1b[4~'   # key <End>
+
+    def tagged(self, index, cursor = None):
+        return None
+
+    def banned(self, index, cursor = None):
+        return None
 
 class PttBoard(PttMenu):
 
@@ -69,7 +143,8 @@ class PttBoard(PttMenu):
         self._prefix = self.name
         self.onboarding = False
         self.firstKey = None
-        self.threads = {}
+        self.threads = SortedThreads()
+        self.commandEvents = []
 
         # TODO: use datetime.timedelta
         self.firstVisited = self.lastVisited = 0  # Epoch time
@@ -77,17 +152,17 @@ class PttBoard(PttMenu):
         self.revisit = 0  # in number of revisit
 
     @staticmethod
-    def is_entered(lines, board=None, ignoreBottom=False):
+    def is_entered(lines, board=None):
         # In '系列' only displays the first thread for a series
         title = re.match("【(板主:|徵求中).+(看板|系列|文摘)《([\w-]+)》$", lines[0].strip())
-        if title and (ignoreBottom or re.match("文章選讀", lines[-1].lstrip())):
+        if title:   # and (ignoreBottom or re.match("文章選讀", lines[-1].lstrip())):
             yield ProxyEvent(ProxyEvent.BOARD_NAME, title.group(3))
             yield ProxyEvent.as_bool((board == title.group(3)) if board else True)
         else:
             yield ProxyEvent.as_bool(False)
 
-    def is_entered_self(self, lines, ignoreBottom=False):
-        return ProxyEvent.eval_bool(self.is_entered(lines, self.name, ignoreBottom))
+    def is_entered_self(self, lines):
+        return ProxyEvent.eval_bool(self.is_entered(lines, self.name))
 
     def enter(self, y, x, lines):
         self.enteredTime = time.time()
@@ -111,6 +186,36 @@ class PttBoard(PttMenu):
         if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
 
+    def client_event(self, event: ClientEvent):
+        class Commands:
+            Names = ["GOTO_VIEWED", "GOTO_TAGGED", "GOTO_BANNED"]
+            Commands = {getattr(ProxyEvent, name): getattr(self, name.lower()) for name in Names}
+
+            @classmethod
+            def __call__(cls, event):
+                # e.g. ProxyEvent.GOTO_VIEWED: return self.goto_viewed(cls.lets_do_it, event.content)
+                return cls.Commands[event._type](cls.lets_do_it, event.content)
+
+            @classmethod
+            def watched(cls, lets_do_it):
+                cls.lets_do_it = lets_do_it
+                return {getattr(ProxyEvent, name): cls() for name in cls.Names}
+
+        if isinstance(self.subMenu, BoardCommandBox):
+            lets_do_it = super().client_event(event)
+            lets_do_exit = self.lets_do_subMenuExited(0, 0, [' '])
+            yield from self.lets_do_if_return(lets_do_it, lets_do_exit, Commands.watched(lets_do_it))
+            for event in self.commandEvents:
+                yield event
+            self.commandEvents = []
+        else:
+            yield from super().client_event(event)
+            if self.subMenu: return
+
+            if self.clientEvent == ClientEvent.x:
+                yield ProxyEvent.drop_content
+                yield from self.lets_do_new_subMenu(BoardCommandBox, 0, 0, [' '])
+
     def pre_update(self, y, x, lines, **kwargs):
         if not self.onboarding:
             yield from super().pre_update(y, x, lines, **kwargs)
@@ -128,7 +233,7 @@ class PttBoard(PttMenu):
     @staticmethod
     def thread_key(line):
         if '★' in line[:6]:
-            prefix = "****** "
+            prefix = "?????? "  # ord('?') > ord('0'~'9')
             line = line[7:]
         else:
             prefix = line[1:8]
@@ -164,8 +269,8 @@ class PttBoard(PttMenu):
 
         if 'peekData' in kwargs:
             peekData = kwargs['peekData']
-            cursorUp = re.match(self.re_cursorToBegin + b'>\r' + self.re_cursorUpDown + b' ' + self.re_cursorToBegin, peekData) is not None
-            cursorDown = re.match(b' \r' + self.re_cursorUpDown + b'>\r', peekData) is not None
+            cursorUp = re.match(self.re_cursorToBegin + b'>.*\r' + self.re_cursorUpDown + b'.* .*' + self.re_cursorToBegin, peekData) is not None
+            cursorDown = re.match(b' .*\r' + self.re_cursorUpDown + b'.*>.*\r', peekData) is not None
             if not cursorUp and not cursorDown:
                 yield from self.clear_marks(lines)
 
@@ -178,6 +283,7 @@ class PttBoard(PttMenu):
                  ClientEvent.i: BoardInfo,
                  ClientEvent.I: BoardInfo,
                  ClientEvent.b: OnboardingScreen,
+                 ClientEvent.v: ReadUnreadConfig,
                  ClientEvent.PoundSign:    SearchBox,
                  ClientEvent.Slash:        SearchBox,
                  ClientEvent.QuestionMark: SearchBox,
@@ -235,7 +341,7 @@ class PttBoard(PttMenu):
 
     def lets_do_subMenuExited(self, y, x, lines):
         # when returned from SearchBox searching for AIDC, the bottom line may be absent
-        self.returnedFromSearchBox = isinstance(self.subMenu, SearchBox)
+        #self.returnedFromSearchBox = isinstance(self.subMenu, (SearchBox, JumpToEntry))
 
         resume_event = self.subMenu.to_be_resumed()
         if resume_event: self.resumingSubMenu = self.subMenu
@@ -245,7 +351,7 @@ class PttBoard(PttMenu):
         self.firstKey = None
 
     def post_update_is_self(self, y, x, lines):
-        if not self.is_entered_self(lines, getattr(self, "returnedFromSearchBox", False)):
+        if not self.is_entered_self(lines):
             if ProxyEvent.eval_bool(PttThread.is_entered(lines)):
                 # switch to another thread
                 # cannot call makeThread() here since we don't have the title line
@@ -262,6 +368,19 @@ class PttBoard(PttMenu):
 
         if hasattr(self, "resumingSubMenu"): return
         yield from self.mark_threads(lines)
+
+    def goto_viewed(self, lets_do_it, index: str):
+        print(self.prefix(), "viewed", index)
+        data = self.threads.viewed(index.lower(), self.thread_key(self.cursorLine))
+        if data is not None:
+            event = ProxyEvent.send_to_server(data)
+            self.commandEvents.append(event)
+
+    def goto_tagged(self, lets_do_it, index: str):
+        print(self.prefix(), "tagged", index)
+
+    def goto_banned(self, lets_do_it, index: str):
+        print(self.prefix(), "banned", index)
 
     FirstRow = 4
     MinColumns = 108
