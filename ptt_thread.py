@@ -7,7 +7,7 @@ from uao import register_uao
 register_uao()
 
 from ptt_event import ClientEvent, ProxyEvent, ClientContext
-from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo
+from ptt_menu import PttMenu, SearchBoard, HelpScreen, ThreadInfo, SearchBox
 from ptt_command import CommandBox
 
 
@@ -287,6 +287,7 @@ class PttThread(PttMenu):
     subMenus = { ClientEvent.s: SearchBoard,
                  ClientEvent.h: HelpScreen,
                  ClientEvent.QuestionMark: HelpScreen,
+                 ClientEvent.PoundSign: SearchBox,
                  ClientEvent.o: ThreadOption,
                  ClientEvent.Backslash: ThreadOption,
                  ClientEvent.Q: ThreadInfo,
@@ -326,11 +327,11 @@ class PttThread(PttMenu):
     def subMenuEntered(self):
         yield from super().subMenuEntered()
 
-        if isinstance(self.subMenu, (ThreadInfo, SearchBoard)):
+        if isinstance(self.subMenu, (ThreadInfo, SearchBoard, SearchBox)):
             yield ProxyEvent.queue_server
 
     def post_update_submenu(self, y, x, lines):
-        server_queued = isinstance(self.subMenu, (ThreadInfo, SearchBoard))
+        server_queued = isinstance(self.subMenu, (ThreadInfo, SearchBoard, SearchBox))
         yield from super().post_update_submenu(y, x, lines)
         if server_queued:
             if self.subMenu:
@@ -339,6 +340,11 @@ class PttThread(PttMenu):
                 # switch to another board
                 yield ProxyEvent.purge_server
                 yield ProxyEvent.resume_server
+            elif self.board.thread_key(lines[y]) != self.key:
+                # point to another post
+                yield ProxyEvent.purge_server
+                yield ProxyEvent.resume_server
+                yield ProxyEvent.event_to_server(ClientEvent.r)
             else:
                 # exit to the board
                 yield ProxyEvent.discard_server
@@ -351,9 +357,11 @@ class PttThread(PttMenu):
                     self.setEnterTrigger(ProxyEvent.send_to_server(b':%d\r' % self.viewedFirstLine))
                     self.setUpdateTrigger(ProxyEvent.copy_screen)
                     self.setUpdateTrigger(ProxyEvent.resume_stream)
+                    self.setUpdateTrigger(ProxyEvent.draw_cursor)
                 else:
                     self.setEnterTrigger(ProxyEvent.copy_screen)
                     self.setEnterTrigger(ProxyEvent.resume_stream)
+                    self.setEnterTrigger(ProxyEvent.draw_cursor)
 
     re_match_browse_line = (lambda line: re.match("瀏覽.+\(\s*?(\d+)%\)\s+目前顯示: 第 (\d+)~(\d+) 行", line.lstrip()))
 
@@ -614,6 +622,7 @@ class PttThread(PttMenu):
             yield ProxyEvent.draw_client(ClientContext(row, col, content))
             floor += 1
         self.floorInView = 0
+        yield ProxyEvent.draw_cursor
 
     def scanFloor(self):
         if not self.groundLine: return

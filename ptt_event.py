@@ -129,6 +129,8 @@ class ProxyEvent:
     DRAW_CURSOR = 0x182
     RESET_RENDITION = 0x183
     COPY_SCREEN = 0x184     # copy terminal screen to client
+    PUSH_CURSOR = 0x185
+    PURGE_CURSOR = 0x186    # send to client if pushed
 
     # terminal requests, needs to be forwarded along the generator-chain
     TERMINAL_REQUEST = 0x200
@@ -141,7 +143,7 @@ class ProxyEvent:
                      "RESUME_STREAM", "QUEUE_SERVER", "PURGE_SERVER", "DISCARD_SERVER", "RESUME_SERVER",
                      "DROP_CONTENT",
                      "GET_GROUND",
-                     "DRAW_CURSOR", "RESET_RENDITION", "COPY_SCREEN",
+                     "DRAW_CURSOR", "RESET_RENDITION", "COPY_SCREEN", "PUSH_CURSOR",
                      "REQ_SCREEN_COLUMN", "REQ_CURSOR_BACKGROUND", "REQ_SUBMENU_CACHED",
                    }
 

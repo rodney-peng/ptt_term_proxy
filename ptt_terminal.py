@@ -95,6 +95,7 @@ class PttTerminal:
         self.menu = None    # PttBoardList
         self.boardlist = PttBoardList()
         self.initialized = False
+        self.cursors = []
 
     # screen and stream operations
 
@@ -204,6 +205,13 @@ class PttTerminal:
         return self.draw(ctx) + self.screen.rawDataBlock(row - 1, col - 1, length) + self.selectGraphic()
 
     # messages from proxy
+
+    def pre_client_message(self, content):
+        if self.menu:
+            y, x, _ = self.cursor()
+            lets_do_it = self.menu.pre_client_event(y, x, content)
+            for event in lets_do_it:
+                yield from self.lets_do_terminal_event(lets_do_it, event)
 
     vt_keys = ["Home", "Insert", "Delete", "End", "PgUp", "PgDn", "Home", "End"]
     xterm_keys = ["Up", "Down", "Right", "Left", "?", "End", "Keypad 5", "Home"]
@@ -431,6 +439,16 @@ class PttTerminal:
             for row in range(1, rows+1):
                 data = self.screenData(ClientContext(row, 1, length=cols))
                 yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+        elif event._type == ProxyEvent.PUSH_CURSOR:
+            self.cursors.append(self.cursor())
+        elif event._type == ProxyEvent.PURGE_CURSOR:
+            if self.cursors:
+                y, x, _ = self.cursors[0]
+                # return internal cursor?
+                if event.content: self.screen.cursor_position(y + 1, x + 1)
+                data = self.cursor_position(y, x)
+                yield (ProxyEvent.insert_to_client(data) if pre_update else ProxyEvent.send_to_client(data))
+                self.cursors = []
         else:
             yield ProxyEvent.warning(event)
 

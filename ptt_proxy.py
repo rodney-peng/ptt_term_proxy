@@ -130,8 +130,12 @@ class PttFlow:
             self.client_cut += len(flow_msg.content)
             flow_msg.content = b''
 
-        lets_do_it = self.terminal.client_message(client_msg)
+        lets_do_it = self.terminal.pre_client_message(client_msg)
         evctx = self.EventContext()
+        for event in self.terminal_events(lets_do_it, evctx):
+            print("proxy.terminal.pre_client:", event)
+
+        lets_do_it = self.terminal.client_message(client_msg)
         for event in self.terminal_events(lets_do_it, evctx):
             print("proxy.terminal.client:", event)
 
@@ -226,18 +230,18 @@ class PttFlow:
             self.purge_terminal_message(self.terminal_event, evctx)
 
             if evctx.sendToClient:
-#                print("proxy.server_message: sendToClient", [len(b) for b in evctx.sendToClient])
+                ctx.log.info("proxy.server_message: sendToClient " + str(evctx.sendToClient))
                 flow_msg.content += b''.join(evctx.sendToClient)
         else:
             self.terminal_event.set()
 
         if evctx.insertToServer or evctx.sendToServer:
-#            print("proxy.server_message: insertToServer", [len(b) for b in evctx.insertToServer])
-#            print("proxy.server_message: sendToServer", [len(b) for b in evctx.sendToServer])
+            ctx.log.info("proxy.server_message: insertToServer " + str(evctx.insertToServer))
+            ctx.log.info("proxy.server_message: sendToServer " + str(evctx.sendToServer))
             self.sendToServer(b''.join(evctx.insertToServer + evctx.sendToServer))
 
         if firstSegment and evctx.insertToClient:
-#            print("proxy.server_message: insertToClient", [len(b) for b in evctx.insertToClient])
+            ctx.log.info("proxy.server_message: insertToClient " + str(evctx.insertToClient))
             flow_msg.content = b''.join(evctx.insertToClient) + flow_msg.content
 
     async def terminal_msg_timeout(self, flow: http.HTTPFlow, event: asyncio.Event):

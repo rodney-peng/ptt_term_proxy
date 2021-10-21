@@ -173,6 +173,7 @@ class PttBoard(PttMenu):
 
         yield from super().enter(y, x, lines)
         self.cursorLine = ""
+        self.firstKey = None
 
         if "動畫播放中" in lines[-1] or "請按任意鍵繼續" in lines[-1]:
             self.onboarding = True
@@ -185,6 +186,12 @@ class PttBoard(PttMenu):
         elapsed = self.lastVisited - self.enteredTime
         if elapsed > 0: self.elapsedTime += elapsed
         yield from super().exit()
+
+    def pre_client_event(self, y, x, content: bytes):
+        if b'\x1b[A' in content or b'\x1b[B' in content:
+            yield ProxyEvent.push_cursor
+
+        yield from super().pre_client_event(y, x, content)
 
     def client_event(self, event: ClientEvent):
         class Commands:
@@ -217,8 +224,10 @@ class PttBoard(PttMenu):
                 yield from self.lets_do_new_subMenu(BoardCommandBox, 0, 0, [' '])
 
     def pre_update(self, y, x, lines, **kwargs):
+        self.cursorMove = False
         if not self.onboarding:
             yield from super().pre_update(y, x, lines, **kwargs)
+        yield ProxyEvent.purge_cursor(self.cursorMove)
 
     def post_update(self, y, x, lines):
         if self.onboarding:
@@ -271,7 +280,9 @@ class PttBoard(PttMenu):
             peekData = kwargs['peekData']
             cursorUp = re.match(self.re_cursorToBegin + b'>.*\r' + self.re_cursorUpDown + b'.* .*' + self.re_cursorToBegin, peekData) is not None
             cursorDown = re.match(b' .*\r' + self.re_cursorUpDown + b'.*>.*\r', peekData) is not None
-            if not cursorUp and not cursorDown:
+#            print(self.prefix(), "pre_update_self", cursorUp, cursorDown, peekData)
+            self.cursorMove = cursorUp or cursorDown
+            if not self.cursorMove:
                 yield from self.clear_marks(lines)
 
         yield from super().pre_update_self(y, x, lines, **kwargs)
@@ -387,7 +398,7 @@ class PttBoard(PttMenu):
     MaxWidth = 8
 
     def mark_threads(self, lines):
-        firstKey = self.thread_key(lines[self.FirstRow])
+        firstKey = self.thread_key(lines[self.FirstRow-1])
         if self.firstKey and self.firstKey == firstKey: return
         self.firstKey = firstKey
 
@@ -432,8 +443,11 @@ class PttBoard(PttMenu):
                 n += 1
             row += 1
         if n:
+            self.firstKey = None
             yield ProxyEvent.reset_rendition
-            yield ProxyEvent.draw_cursor
+            # cannot return the cursor here since it will be wrong position if the client message has Up or Down
+            # use push_cursor and purge_cursor as workaround
+            #yield ProxyEvent.draw_cursor
 
 if __name__ == "__main__":
     from ptt_menu import test

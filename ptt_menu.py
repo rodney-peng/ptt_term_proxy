@@ -125,6 +125,10 @@ class PttMenu(PttMenuTemplate, ABC):
         super().reset()
         self.subMenu = None
 
+    def pre_client_event(self, y, x, content: bytes):
+        if self.subMenu:
+            yield from self.subMenu.pre_client_event(y, x, content)
+
     def client_event(self, event: ClientEvent):
         if self.subMenu:
             yield from self.subMenu.client_event(event)
